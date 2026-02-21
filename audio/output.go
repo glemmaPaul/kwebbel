@@ -28,7 +28,7 @@ func NewAudioOutput(m *Mixer) (*AudioOutput, error) {
 	}, nil
 }
 
-func (ao *AudioOutput) Start() error {
+func (audioOutput *AudioOutput) Start() error {
 	deviceConfig := malgo.DefaultDeviceConfig(malgo.Playback)
 	deviceConfig.Playback.Format = malgo.FormatS16
 	deviceConfig.Playback.Channels = 1
@@ -42,7 +42,7 @@ func (ao *AudioOutput) Start() error {
 
 		// 2. PULL from Mixer
 		// The mixer handles the math, buffering, and silence generation
-		mixedPCM := ao.mixer.GetMixedSamples(samplesNeeded)
+		mixedPCM := audioOutput.mixer.GetMixedSamples(samplesNeeded)
 
 		// 3. Convert Int16 -> Bytes
 		// Malgo expects bytes, but our mixer works in math (int16)
@@ -56,11 +56,11 @@ func (ao *AudioOutput) Start() error {
 		Data: onRecv,
 	}
 
-	device, err := malgo.InitDevice(ao.ctx.Context, deviceConfig, deviceCallbacks)
+	device, err := malgo.InitDevice(audioOutput.ctx.Context, deviceConfig, deviceCallbacks)
 	if err != nil {
 		return err
 	}
-	ao.device = device
+	audioOutput.device = device
 	return device.Start()
 }
 

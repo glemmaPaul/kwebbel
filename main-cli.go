@@ -11,6 +11,7 @@ import (
 
 	"github.com/kwebbelkorp/kwebbel/audio"
 	"github.com/kwebbelkorp/kwebbel/conn"
+	"github.com/kwebbelkorp/kwebbel/kwebbel"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -22,7 +23,7 @@ func main() {
 	flag.Parse()
 
 	fmt.Println("Listening on port", *port)
-	host, err := conn.CreateHost(*port, nil)
+	host, err := conn.CreateHost(0, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -33,30 +34,18 @@ func main() {
 	}
 	addrs, err := peer.AddrInfoToP2pAddrs(&peerInfo)
 	fmt.Println("libp2p node address:", addrs[0])
-	mixer := audio.NewMixer()
+
 	cm := conn.NewConnectionManager(host)
 
-	if *connectTo != "" {
-		// 2. Start Audio Input (Mic)
-		mic, err := audio.NewAudioInput()
-		if err != nil {
-			log.Fatal(err)
-		}
+	kwebbelaar := kwebbel.NewKwebbelaar(cm)
 
-		encodedChan := make(chan []byte, 100)
-		egress := audio.AudioEgress{
-			Input: mic.OutputChan,
-			Output: func(data []byte) {
-				encodedChan <- data
-			},
-		}
-		egress.StartProcessing()
-		err = mic.Start()
+	if *connectTo != "" {
+		audioEgress, err := kwebbelaar.StartAudioEgress()
 		if err != nil {
 			log.Fatal(err)
 		}
 		cm.DialPeers(context.Background(), []string{*connectTo})
-		go cm.GoBroadcast(encodedChan)
+		go cm.GoBroadcast(audioEgress.Output)
 
 		// Create a group
 		// group := conn.NewGroup("default", []peer.ID{peerID})
@@ -65,11 +54,8 @@ func main() {
 		// 	log.Fatal(err)
 		// }
 	} else {
-		audioOutput, err := audio.NewAudioOutput(mixer)
-		if err != nil {
-			log.Fatal(err)
-		}
-		err = audioOutput.Start()
+		mixer := audio.NewMixer()
+		err := kwebbelaar.StartAudioOutput(mixer)
 		if err != nil {
 			log.Fatal(err)
 		}

@@ -9,7 +9,14 @@ import (
 
 type AudioEgress struct {
 	Input  <-chan []byte // Raw bytes from Malgo
-	Output func([]byte)  // ConnectionManager.Broadcast
+	Output chan []byte
+}
+
+func NewAudioEgress(input <-chan []byte) *AudioEgress {
+	return &AudioEgress{
+		Input:  input,
+		Output: make(chan []byte, 100),
+	}
 }
 
 func (t *AudioEgress) StartProcessing() {
@@ -46,8 +53,7 @@ func (t *AudioEgress) StartProcessing() {
 			// We must slice it to 'n' bytes, otherwise we send empty zeros
 			encodedPacket := make([]byte, n)
 			copy(encodedPacket, opusBuffer[:n])
-
-			t.Output(encodedPacket)
+			t.Output <- encodedPacket
 		}
 	}()
 }
