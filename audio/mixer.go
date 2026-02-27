@@ -45,7 +45,7 @@ func (m *Mixer) GetMixedSamples(samplesNeeded int) []int16 {
 	for peerID, buffer := range m.peerBuffers {
 		// If peer has enough data
 		if len(buffer) >= samplesNeeded {
-			// 1. Summation
+			// Summation
 			for i := 0; i < samplesNeeded; i++ {
 				tempSum[i] += int32(buffer[i])
 			}
@@ -58,7 +58,7 @@ func (m *Mixer) GetMixedSamples(samplesNeeded int) []int16 {
 		}
 	}
 
-	// 3. Clamping (Anti-Distortion)
+	// Primitive clamping
 	for i := 0; i < samplesNeeded; i++ {
 		val := tempSum[i]
 		if val > clampMax {

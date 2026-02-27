@@ -49,37 +49,33 @@ func CreateHost(port int, randomness io.Reader) (host.Host, error) {
 	return node, nil
 }
 
-func (cm *ConnectionManager) createPeerInfo(destination string) (*peer.AddrInfo, error) {
-	ma, err := multiaddr.NewMultiaddr(destination)
-	if err != nil {
-		return nil, err
-	}
-	peer, err := peer.AddrInfoFromP2pAddr(ma)
-	if err != nil {
-		return nil, err
-	}
-	return peer, nil
-}
-
 func (cm *ConnectionManager) DialPeers(ctx context.Context, destinations []string) error {
 	streams := make(map[peer.ID]network.Stream)
 	for _, destination := range destinations {
-		peer, err := cm.createPeerInfo(destination)
+		// 1. Parse the string as a Multiaddress
+		maddr, err := multiaddr.NewMultiaddr(destination)
 		if err != nil {
-			log.Println("Error creating peer info for", destination, err)
+			log.Printf("Invalid address: %v", err)
 			continue
 		}
 		log.Println("Connecting to", destination)
-		cm.host.Peerstore().AddAddrs(peer.ID, peer.Addrs, peerstore.PermanentAddrTTL)
-		if err := cm.host.Connect(ctx, *peer); err != nil {
-			return err
+		info, err := peer.AddrInfoFromP2pAddr(maddr)
+		if err != nil {
+			log.Printf("AddrInfo error: %v", err)
+			continue
 		}
 
-		stream, err := cm.host.NewStream(ctx, peer.ID, VoiceProtocol)
+		// Relay connections are "limited" - must opt-in to use them for streams
+		cm.host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
+
+		log.Printf("Attempting to dial: %s", info.ID)
+
+		stream, err := cm.host.NewStream(network.WithAllowLimitedConn(ctx, string(VoiceProtocol)), info.ID, VoiceProtocol)
 		if err != nil {
+			log.Println("Error creating stream to", info.ID, err)
 			return err
 		}
-		streams[peer.ID] = stream
+		streams[info.ID] = stream
 	}
 	cm.streams = streams
 	log.Println("Dialed", len(streams), "peers")
@@ -119,22 +115,26 @@ func (cm *ConnectionManager) GoBroadcast(packetStream <-chan []byte) error {
 	return nil
 }
 
-func NewHost(port int, randomness io.Reader) (host.Host, error) {
-	// Creates a new RSA key pair for this host.
-	prvKey, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, randomness)
-	if err != nil {
-		log.Println(err)
-		return nil, err
+func NewHost(port int, prvKey crypto.PrivKey, isLocal bool) (host.Host, error) {
+	ipAddress := "0.0.0.0"
+	if isLocal {
+		ipAddress = "127.0.0.1"
 	}
 
-	// 0.0.0.0 will listen on any interface device.
-	sourceMultiAddr, _ := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", port))
+	tcpAddr, _ := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/%d", ipAddress, port))
+	quicAddr, _ := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", ipAddress, port))
 
-	// libp2p.New constructs a new libp2p Host.
-	// Other options can be added here.
+	// For discovery
+	relayAddr, _ := multiaddr.NewMultiaddr("/p2p-circuit")
+
+	log.Println("Initializing host on", ipAddress, port)
+
 	return libp2p.New(
-		libp2p.ListenAddrs(sourceMultiAddr),
+		libp2p.ListenAddrs(tcpAddr, quicAddr, relayAddr),
 		libp2p.Identity(prvKey),
+		libp2p.EnableRelay(),
+		libp2p.EnableHolePunching(),
+		libp2p.ForceReachabilityPrivate(),
 	)
 }
 
@@ -146,13 +146,6 @@ func (cm *ConnectionManager) CreateIncomingStreamHandler(mixer *audio.Mixer) fun
 
 func (cm *ConnectionManager) handleIncomingStream(s network.Stream, mixer *audio.Mixer) {
 	log.Printf("Incoming voice stream from: %s", s.Conn().RemotePeer())
-
-	// // Add to our broadcast list so we can talk back
-	// cm.AddPeer(s)
-
-	// // 2. SPAWN THE READ LOOP
-	// // This goroutine lives as long as the connection exists
-	// go cm.readStreamLoop(s)
 
 	// TODO: Create factory method for ingress for different types of ingress
 	ingressDecoder := audio.NewAudioIngress(mixer)
