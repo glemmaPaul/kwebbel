@@ -5,6 +5,7 @@ import (
 
 	"github.com/kwebbelkorp/kwebbel/audio"
 	"github.com/kwebbelkorp/kwebbel/conn"
+	"github.com/kwebbelkorp/kwebbel/identity"
 )
 
 type Group struct {
@@ -13,15 +14,17 @@ type Group struct {
 }
 
 type Kwebbelaar struct {
-	cm           *conn.ConnectionManager
+	conn         *conn.ConnectionManager
+	identity     *identity.IdentityManager
 	audioIngress *audio.AudioIngress
 	audioEgress  *audio.AudioEgress
 	group        *Group
 }
 
-func NewKwebbelaar(cm *conn.ConnectionManager) *Kwebbelaar {
+func NewKwebbelaar(conn *conn.ConnectionManager, identity *identity.IdentityManager) *Kwebbelaar {
 	return &Kwebbelaar{
-		cm: cm,
+		conn:     conn,
+		identity: identity,
 	}
 }
 

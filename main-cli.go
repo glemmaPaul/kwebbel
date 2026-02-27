@@ -7,25 +7,71 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/kwebbelkorp/kwebbel/audio"
 	"github.com/kwebbelkorp/kwebbel/conn"
+	"github.com/kwebbelkorp/kwebbel/identity"
 	"github.com/kwebbelkorp/kwebbel/kwebbel"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
+	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
+	"github.com/multiformats/go-multiaddr"
 )
 
 func main() {
-	fmt.Println("Hello, World!")
 	ch := make(chan os.Signal, 1)
-	port := flag.Int("port", 8080, "port to listen on")
 	connectTo := flag.String("connect-to", "", "address to connect to")
+	relayAddr := flag.String("relay-addr", "", "relay address to use")
 	flag.Parse()
 
-	fmt.Println("Listening on port", *port)
-	host, err := conn.CreateHost(0, nil)
+	im, err := identity.NewIdentityManager()
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	roomKey, err := im.DeriveRoomKey("default", "default")
+	host, err := conn.NewHost(0, roomKey, false)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if *relayAddr != "" {
+		serverStr := *relayAddr
+		server, err := peer.AddrInfoFromString(serverStr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		hostErr := host.Connect(context.Background(), *server)
+		if hostErr != nil {
+			log.Fatal(hostErr)
+		}
+
+		host.Peerstore().AddAddrs(server.ID, server.Addrs, peerstore.PermanentAddrTTL)
+
+		// 1. Request the reservation
+		_, err = client.Reserve(context.Background(), host, *server)
+		if err != nil {
+			log.Fatal("Reservation failed:", err)
+		}
+		log.Println("✅ Reservation request accepted by relay")
+
+		// 5. WAIT for the address to appear
+		log.Println("Waiting for relay address...")
+		for i := 0; i < 3; i++ {
+			time.Sleep(1 * time.Second)
+			for _, addr := range host.Addrs() {
+				if strings.Contains(addr.String(), "p2p-circuit") {
+					fmt.Printf("🚀 SUCCESS! REACHABLE AT: %s/p2p/%s\n", addr, host.ID())
+					break
+				}
+			}
+		}
+
+		relayaddr, err := multiaddr.NewMultiaddr("/p2p/" + server.ID.String() + "/p2p-circuit/p2p/" + host.ID().String())
+		log.Println("Relay address:", relayaddr.String())
 	}
 
 	peerInfo := peer.AddrInfo{
@@ -37,7 +83,11 @@ func main() {
 
 	cm := conn.NewConnectionManager(host)
 
-	kwebbelaar := kwebbel.NewKwebbelaar(cm)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	kwebbelaar := kwebbel.NewKwebbelaar(cm, im)
 
 	if *connectTo != "" {
 		audioEgress, err := kwebbelaar.StartAudioEgress()
@@ -47,12 +97,6 @@ func main() {
 		cm.DialPeers(context.Background(), []string{*connectTo})
 		go cm.GoBroadcast(audioEgress.Output)
 
-		// Create a group
-		// group := conn.NewGroup("default", []peer.ID{peerID})
-		// err = cm.JoinGroup(context.Background(), group)
-		// if err != nil {
-		// 	log.Fatal(err)
-		// }
 	} else {
 		mixer := audio.NewMixer()
 		err := kwebbelaar.StartAudioOutput(mixer)

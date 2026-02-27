@@ -2,7 +2,6 @@ package audio
 
 import (
 	"encoding/binary"
-	"log"
 
 	"github.com/gen2brain/malgo"
 )
@@ -17,7 +16,7 @@ type AudioOutput struct {
 // Update constructor to require the Mixer
 func NewAudioOutput(m *Mixer) (*AudioOutput, error) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
-		log.Printf("Malgo Log: %v", message)
+		//log.Printf("Malgo Log: %v", message)
 	})
 	if err != nil {
 		return nil, err
@@ -35,20 +34,16 @@ func (audioOutput *AudioOutput) Start() error {
 	deviceConfig.SampleRate = 48000
 	deviceConfig.PeriodSizeInFrames = 960
 
-	// The Pull Callback: Hardware requests data here
 	onRecv := func(pOutput, pInput []byte, framecount uint32) {
-		// 1. Calculate samples needed (usually 960)
+		// We likely have 960 here.
 		samplesNeeded := int(framecount)
 
-		// 2. PULL from Mixer
-		// The mixer handles the math, buffering, and silence generation
+		// Pull from mixer (multiple incoming streams combined)
 		mixedPCM := audioOutput.mixer.GetMixedSamples(samplesNeeded)
 
-		// 3. Convert Int16 -> Bytes
-		// Malgo expects bytes, but our mixer works in math (int16)
+		// Convert Int16 -> Bytes
 		bytesData := Int16ToBytes(mixedPCM)
 
-		// 4. Write to Hardware Buffer
 		copy(pOutput, bytesData)
 	}
 
@@ -65,6 +60,7 @@ func (audioOutput *AudioOutput) Start() error {
 }
 
 // Helper: Converts Opus output (Int16) to Malgo input (Bytes)
+// * Slightly AI generated code *
 func Int16ToBytes(data []int16) []byte {
 	out := make([]byte, len(data)*2)
 	for i, v := range data {

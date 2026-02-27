@@ -1,8 +1,6 @@
 package audio
 
 import (
-	"log"
-
 	"github.com/gen2brain/malgo"
 )
 
@@ -15,7 +13,7 @@ type AudioInput struct {
 
 func NewAudioInput() (*AudioInput, error) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
-		log.Printf("Malgo Log: %v", message)
+		//log.Printf("Malgo Log: %v", message)
 	})
 	if err != nil {
 		return nil, err
