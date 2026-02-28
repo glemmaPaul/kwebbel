@@ -1,11 +1,16 @@
 package kwebbel
 
 import (
+	"context"
 	"fmt"
+	"log"
 
 	"github.com/kwebbelkorp/kwebbel/audio"
 	"github.com/kwebbelkorp/kwebbel/conn"
 	"github.com/kwebbelkorp/kwebbel/identity"
+	"github.com/kwebbelkorp/kwebbel/rooms"
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 type Group struct {
@@ -14,21 +19,44 @@ type Group struct {
 }
 
 type Kwebbelaar struct {
+	host         host.Host
 	conn         *conn.ConnectionManager
 	identity     *identity.IdentityManager
 	audioIngress *audio.AudioIngress
 	audioEgress  *audio.AudioEgress
-	group        *Group
+	// Room management
+	roomManager *rooms.RoomManager
 }
 
-func NewKwebbelaar(conn *conn.ConnectionManager, identity *identity.IdentityManager) *Kwebbelaar {
+func NewKwebbelaar(host host.Host, conn *conn.ConnectionManager, identity *identity.IdentityManager) *Kwebbelaar {
 	return &Kwebbelaar{
+		host:     host,
 		conn:     conn,
 		identity: identity,
 	}
 }
 
 func (k *Kwebbelaar) Start() error {
+	return nil
+}
+
+func (k *Kwebbelaar) JoinRoom(peerID peer.ID) error {
+	log.Println("Joining room", peerID)
+	roomManager, err := rooms.AttendRoom(context.Background(), k.host, peerID)
+	if err != nil {
+		return fmt.Errorf("failed to join room: %w", err)
+	}
+	k.roomManager = roomManager
+	return nil
+}
+
+func (k *Kwebbelaar) BecomeHost(room rooms.Room) error {
+	log.Println("Becoming host", room)
+	roomManager, err := rooms.HostRoom(context.Background(), k.host, room)
+	if err != nil {
+		return fmt.Errorf("failed to become host: %w", err)
+	}
+	k.roomManager = roomManager
 	return nil
 }
 

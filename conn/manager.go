@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"log"
 	"sync"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
+	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -28,25 +28,16 @@ type ConnectionManager struct {
 	host        host.Host
 	streams     map[peer.ID]network.Stream
 	mu          sync.RWMutex
+	relays      map[string]*Relay
+	muRelay     sync.RWMutex
 }
 
 func NewConnectionManager(host host.Host) *ConnectionManager {
 	return &ConnectionManager{
 		activeGroup: nil,
 		host:        host,
+		relays:      make(map[string]*Relay),
 	}
-}
-
-func CreateHost(port int, randomness io.Reader) (host.Host, error) {
-	node, err := libp2p.New(
-		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", port)),
-		libp2p.EnableHolePunching(),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return node, nil
 }
 
 func (cm *ConnectionManager) DialPeers(ctx context.Context, destinations []string) error {
@@ -70,7 +61,7 @@ func (cm *ConnectionManager) DialPeers(ctx context.Context, destinations []strin
 
 		log.Printf("Attempting to dial: %s", info.ID)
 
-		stream, err := cm.host.NewStream(network.WithAllowLimitedConn(ctx, string(VoiceProtocol)), info.ID, VoiceProtocol)
+		stream, err := cm.host.NewStream(context.Background(), info.ID, VoiceProtocol)
 		if err != nil {
 			log.Println("Error creating stream to", info.ID, err)
 			return err
@@ -134,8 +125,34 @@ func NewHost(port int, prvKey crypto.PrivKey, isLocal bool) (host.Host, error) {
 		libp2p.Identity(prvKey),
 		libp2p.EnableRelay(),
 		libp2p.EnableHolePunching(),
-		libp2p.ForceReachabilityPrivate(),
+		libp2p.EnableNATService(),
+		//libp2p.ForceReachabilityPrivate(),
 	)
+}
+
+func (cm *ConnectionManager) JoinRelay(relay *Relay) error {
+	log.Println("Joining relay", relay.ID, relay.Addrs, relay.Location)
+	addrInfo := peer.AddrInfo{
+		ID:    relay.ID,
+		Addrs: relay.Addrs,
+	}
+	hostErr := cm.host.Connect(context.Background(), addrInfo)
+	if hostErr != nil {
+		return fmt.Errorf("failed to connect to relay: %w", hostErr)
+	}
+
+	cm.host.Peerstore().AddAddrs(relay.ID, relay.Addrs, peerstore.PermanentAddrTTL)
+
+	_, err := client.Reserve(context.Background(), cm.host, addrInfo)
+	if err != nil {
+		return fmt.Errorf("reservation failed: %w", err)
+	}
+	log.Println("✅ Reservation request accepted by relay")
+
+	cm.muRelay.Lock()
+	cm.relays[relay.Location] = relay
+	cm.muRelay.Unlock()
+	return nil
 }
 
 func (cm *ConnectionManager) CreateIncomingStreamHandler(mixer *audio.Mixer) func(network.Stream) {
