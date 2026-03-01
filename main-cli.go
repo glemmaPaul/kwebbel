@@ -15,10 +15,13 @@ import (
 	"github.com/kwebbelkorp/kwebbel/conn"
 	"github.com/kwebbelkorp/kwebbel/identity"
 	"github.com/kwebbelkorp/kwebbel/kwebbel"
+	"github.com/kwebbelkorp/kwebbel/rooms"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	"github.com/multiformats/go-multiaddr"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 func main() {
@@ -38,13 +41,45 @@ func main() {
 		log.Fatal(err)
 	}
 
+	peerInfo := peer.AddrInfo{
+		ID:    host.ID(),
+		Addrs: host.Addrs(),
+	}
+	addrs, err := peer.AddrInfoToP2pAddrs(&peerInfo)
+	fmt.Println("libp2p node address:", addrs[0])
+
+	cm := conn.NewConnectionManager(host)
+
+	kwebbelaar := kwebbel.NewKwebbelaar(cm, im)
+	mixer := audio.NewMixer()
+	outputErr := kwebbelaar.StartAudioOutput(mixer)
+	if outputErr != nil {
+		log.Fatal(outputErr)
+	}
+
+	host.SetStreamHandler(conn.VoiceProtocol, func(s network.Stream) {
+		ingressDecoder := audio.NewAudioIngress(mixer)
+		go ingressDecoder.ReadStream(s)
+	})
+	host.SetStreamHandler(rooms.RoomProtocol, func(s network.Stream) {
+		log.Println("Incoming room stream from:", s.Conn().RemotePeer())
+
+	})
+
 	if *relayAddr != "" {
-		serverStr := *relayAddr
-		server, err := peer.AddrInfoFromString(serverStr)
+		peerId, err := peer.Decode("12D3KooWQgBCgKZLsZmMWyGw3K6YrrsLwGq1xU6Gv2ewdtcNMhc3")
 		if err != nil {
 			log.Fatal(err)
 		}
-		hostErr := host.Connect(context.Background(), *server)
+		//serverStr := *relayAddr
+		server := peer.AddrInfo{
+			ID: peerId,
+			Addrs: []ma.Multiaddr{
+				ma.StringCast("/ip4/89.167.83.252/udp/4242/quic-v1"),
+				ma.StringCast("/ip4/89.167.83.252/tcp/4242"),
+			},
+		}
+		hostErr := host.Connect(context.Background(), server)
 		if hostErr != nil {
 			log.Fatal(hostErr)
 		}
@@ -52,7 +87,7 @@ func main() {
 		host.Peerstore().AddAddrs(server.ID, server.Addrs, peerstore.PermanentAddrTTL)
 
 		// 1. Request the reservation
-		_, err = client.Reserve(context.Background(), host, *server)
+		_, err = client.Reserve(context.Background(), host, server)
 		if err != nil {
 			log.Fatal("Reservation failed:", err)
 		}
@@ -70,40 +105,31 @@ func main() {
 			}
 		}
 
-		relayaddr, err := multiaddr.NewMultiaddr("/p2p/" + server.ID.String() + "/p2p-circuit/p2p/" + host.ID().String())
+		relayaddr, _ := multiaddr.NewMultiaddr("/p2p/" + server.ID.String() + "/p2p-circuit/p2p/" + host.ID().String())
 		log.Println("Relay address:", relayaddr.String())
 	}
 
-	peerInfo := peer.AddrInfo{
-		ID:    host.ID(),
-		Addrs: host.Addrs(),
-	}
-	addrs, err := peer.AddrInfoToP2pAddrs(&peerInfo)
-	fmt.Println("libp2p node address:", addrs[0])
-
-	cm := conn.NewConnectionManager(host)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	kwebbelaar := kwebbel.NewKwebbelaar(cm, im)
-
 	if *connectTo != "" {
+		peerAddrInfo, err := peer.AddrInfoFromString(*connectTo)
+		if err != nil {
+			log.Fatal(err)
+		}
 		audioEgress, err := kwebbelaar.StartAudioEgress()
 		if err != nil {
 			log.Fatal(err)
 		}
 		cm.DialPeers(context.Background(), []string{*connectTo})
 		go cm.GoBroadcast(audioEgress.Output)
+		log.Println("Starting audio egress", audioEgress.Output)
 
-	} else {
-		mixer := audio.NewMixer()
-		err := kwebbelaar.StartAudioOutput(mixer)
-		if err != nil {
-			log.Fatal(err)
-		}
-		host.SetStreamHandler(conn.VoiceProtocol, cm.CreateIncomingStreamHandler(mixer))
+		host.Peerstore().AddAddrs(peerAddrInfo.ID, peerAddrInfo.Addrs, peerstore.PermanentAddrTTL)
+
+		// stream, err := host.NewStream(context.Background(), peerAddrInfo.ID, rooms.RoomProtocol)
+		// if err != nil {
+		// 	log.Fatal(err)
+		// }
+		// log.Println("Outgoing room stream to:", stream.Conn().RemotePeer())
+		// stream.Write([]byte("Hello from client"))
 
 	}
 

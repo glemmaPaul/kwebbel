@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"log"
 	"sync"
 
 	"github.com/kwebbelkorp/kwebbel/audio"
+	"github.com/kwebbelkorp/kwebbel/rooms"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -35,18 +35,6 @@ func NewConnectionManager(host host.Host) *ConnectionManager {
 		activeGroup: nil,
 		host:        host,
 	}
-}
-
-func CreateHost(port int, randomness io.Reader) (host.Host, error) {
-	node, err := libp2p.New(
-		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", port)),
-		libp2p.EnableHolePunching(),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return node, nil
 }
 
 func (cm *ConnectionManager) DialPeers(ctx context.Context, destinations []string) error {
@@ -76,6 +64,16 @@ func (cm *ConnectionManager) DialPeers(ctx context.Context, destinations []strin
 			return err
 		}
 		streams[info.ID] = stream
+
+		roomStream, err := cm.host.NewStream(network.WithAllowLimitedConn(ctx, string(rooms.RoomProtocol)), info.ID, rooms.RoomProtocol)
+		if err != nil {
+			log.Println("Error creating message stream to", info.ID, err)
+			return err
+		}
+
+		// test out
+		roomStream.Write([]byte("Hello from client"))
+
 	}
 	cm.streams = streams
 	log.Println("Dialed", len(streams), "peers")
