@@ -1,7 +1,3 @@
-/*
-~ AI generated code ~
-*/
-
 package audio
 
 import (
@@ -12,7 +8,9 @@ import (
 )
 
 type AudioEgress struct {
-	Input  <-chan []byte // Raw bytes from Malgo
+	// Input receives little-endian int16 PCM frames (20ms, 960 samples @ 48kHz).
+	Input <-chan []byte
+	// Output produces Opus packets to publish over WebRTC.
 	Output chan []byte
 }
 
@@ -32,15 +30,14 @@ func (t *AudioEgress) StartProcessing() {
 	}
 
 	go func() {
-		// Buffer for the Opus output (1KB is plenty for voice)
+		// Buffer for the Opus output (1KB is enough for typical voice frames).
 		opusBuffer := make([]byte, 1000)
 
 		for rawBytes := range t.Input {
 			// 2. Convert []byte (Malgo) to []int16 (Opus)
 			pcmData := BytesToInt16(rawBytes)
 
-			// 3. Safety Check: Ensure we have exactly 960 samples (20ms)
-			// Opus will error if frame size is wrong.
+			// Opus expects fixed frame size for this setup (20ms @ 48kHz mono).
 			if len(pcmData) != 960 {
 				log.Printf("Warning: Incorrect frame size: %d samples", len(pcmData))
 				continue
@@ -53,8 +50,7 @@ func (t *AudioEgress) StartProcessing() {
 				continue
 			}
 
-			// 5. Send encoded data to network
-			// We must slice it to 'n' bytes, otherwise we send empty zeros
+			// Forward only the encoded bytes for this frame.
 			encodedPacket := make([]byte, n)
 			copy(encodedPacket, opusBuffer[:n])
 			t.Output <- encodedPacket
@@ -62,10 +58,8 @@ func (t *AudioEgress) StartProcessing() {
 	}()
 }
 
-// BytesToInt16 converts raw bytes (Little Endian) to []int16
-// Malgo outputs Little Endian by default on most architectures.
+// BytesToInt16 converts little-endian PCM bytes to int16 samples.
 func BytesToInt16(data []byte) []int16 {
-	// 2 bytes = 1 int16
 	if len(data)%2 != 0 {
 		log.Println("Odd byte length, data corruption?")
 		return nil
@@ -82,8 +76,4 @@ func BytesToInt16(data []byte) []int16 {
 	}
 
 	return out
-}
-
-func NewChannel() <-chan []byte {
-	return make(chan []byte, 100)
 }

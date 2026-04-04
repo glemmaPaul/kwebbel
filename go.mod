@@ -1,15 +1,16 @@
 module github.com/kwebbelkorp/kwebbel
 
-go 1.24.6
-
-toolchain go1.24.13
+go 1.25.0
 
 require (
 	github.com/gen2brain/malgo v0.11.24
 	github.com/google/uuid v1.6.0
+	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/hraban/opus v0.0.0-20251117090126-c76ea7e21bf3
 	github.com/libp2p/go-libp2p v0.47.0
 	github.com/multiformats/go-multiaddr v0.16.0
+	github.com/pion/interceptor v0.1.40
+	github.com/pion/webrtc/v4 v4.1.2
 	golang.org/x/crypto v0.41.0
 )
 
@@ -56,7 +57,6 @@ require (
 	github.com/pion/dtls/v2 v2.2.12 // indirect
 	github.com/pion/dtls/v3 v3.0.6 // indirect
 	github.com/pion/ice/v4 v4.0.10 // indirect
-	github.com/pion/interceptor v0.1.40 // indirect
 	github.com/pion/logging v0.2.3 // indirect
 	github.com/pion/mdns/v2 v2.0.7 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
@@ -70,7 +70,6 @@ require (
 	github.com/pion/transport/v2 v2.2.10 // indirect
 	github.com/pion/transport/v3 v3.0.7 // indirect
 	github.com/pion/turn/v4 v4.0.2 // indirect
-	github.com/pion/webrtc/v4 v4.1.2 // indirect
 	github.com/prometheus/client_golang v1.22.0 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.64.0 // indirect

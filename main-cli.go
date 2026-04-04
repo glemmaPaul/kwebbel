@@ -50,24 +50,14 @@ func main() {
 	addrs, err := peer.AddrInfoToP2pAddrs(&peerInfo)
 	fmt.Println("libp2p node address:", addrs[0])
 
-	cm := conn.NewConnectionManager(host)
-
-	kwebbelaar := core.NewKwebbelaar(&host, cm, im)
+	kwebbelaar := core.NewKwebbelaar(&host, im)
 	mixer := audio.NewMixer()
 	outputErr := kwebbelaar.StartAudioOutput(mixer)
 	if outputErr != nil {
 		log.Fatal(outputErr)
 	}
 
-	host.SetStreamHandler(conn.VoiceProtocol, func(s network.Stream) {
-		ingressDecoder := audio.NewAudioIngress(mixer)
-		go ingressDecoder.ReadStream(s)
-		// We also dial back to the peer
-		circuitLink := "/p2p/" + s.Conn().RemotePeer().String()
-		if !cm.IsDialed(s.Conn().RemotePeer()) {
-			cm.DialPeers(context.Background(), host, []string{circuitLink})
-		}
-	})
+	webrtcBridge := conn.NewWebRTCAudioBridge(host, mixer)
 
 	if *connectTo == "" {
 		room := rooms.NewRoom("default")
@@ -128,11 +118,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	go cm.GoBroadcast(audioEgress.Output)
+	webrtcBridge.StartPublishing(context.Background(), audioEgress.Output)
 
 	if *connectTo != "" {
-
-		// cm.DialPeers(context.Background(), []string{*connectTo})
 		// 1. Parse the string as a Multiaddress
 		maddr, err := multiaddr.NewMultiaddr(*connectTo)
 		if err != nil {
@@ -149,14 +137,13 @@ func main() {
 		// Relay connections are "limited" - must opt-in to use them for streams
 		host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
 
-		log.Printf("Attempting to dial: %s", info.ID)
-
-		_, err = host.NewStream(network.WithAllowLimitedConn(context.Background(), string(conn.VoiceProtocol)), info.ID, conn.VoiceProtocol)
-		if err != nil {
-			log.Println("Error creating stream to", info.ID, err)
+		log.Printf("Attempting WebRTC negotiation with: %s", info.ID)
+		if err := webrtcBridge.DialAndNegotiate(context.Background(), *info); err != nil {
+			log.Println("Error starting WebRTC negotiation with", info.ID, err)
 			log.Fatal(err)
 		}
 
+		log.Printf("Opening room stream to: %s", info.ID)
 		roomStream, err := host.NewStream(network.WithAllowLimitedConn(context.Background(), string(rooms.RoomProtocol)), info.ID, rooms.RoomProtocol)
 		if err != nil {
 			log.Println("Error creating message stream to", info.ID, err)
@@ -175,5 +162,6 @@ func main() {
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	<-ch
 	fmt.Println("Shutting down...")
+	webrtcBridge.Close()
 	host.Close()
 }

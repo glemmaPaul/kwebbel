@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/kwebbelkorp/kwebbel/audio"
-	"github.com/kwebbelkorp/kwebbel/conn"
 	"github.com/kwebbelkorp/kwebbel/identity"
 	"github.com/libp2p/go-libp2p/core/host"
 )
@@ -15,18 +14,15 @@ type Group struct {
 }
 
 type Kwebbelaar struct {
-	host         *host.Host
-	conn         *conn.ConnectionManager
-	identity     *identity.IdentityManager
-	audioIngress *audio.AudioIngress
-	audioEgress  *audio.AudioEgress
-	group        *Group
+	host        *host.Host
+	identity    *identity.IdentityManager
+	audioEgress *audio.AudioEgress
+	group       *Group
 }
 
-func NewKwebbelaar(host *host.Host, conn *conn.ConnectionManager, identity *identity.IdentityManager) *Kwebbelaar {
+func NewKwebbelaar(host *host.Host, identity *identity.IdentityManager) *Kwebbelaar {
 	return &Kwebbelaar{
 		host:     host,
-		conn:     conn,
 		identity: identity,
 	}
 }
