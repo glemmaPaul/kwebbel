@@ -1,3 +1,7 @@
+/*
+~ AI generated code ~
+*/
+
 package audio
 
 import (

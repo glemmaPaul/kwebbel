@@ -32,8 +32,6 @@ func (ai *AudioInput) Start() error {
 	deviceConfig.SampleRate = 48000
 	deviceConfig.PeriodSizeInFrames = 960
 
-	// 1. Define the callback function separately
-	// Note: The signature uses []byte, NOT *[0]byte
 	onRecv := func(pOutput, pInput []byte, framecount uint32) {
 		// pInput contains the raw audio bytes from the microphone
 
@@ -49,13 +47,10 @@ func (ai *AudioInput) Start() error {
 		}
 	}
 
-	// 2. Put it in the DeviceCallbacks struct
 	deviceCallbacks := malgo.DeviceCallbacks{
 		Data: onRecv,
 	}
 
-	// 3. Pass deviceCallbacks as the 3rd argument
-	// (In the previous code, we passed an empty malgo.DeviceCallbacks{} which was wrong)
 	device, err := malgo.InitDevice(ai.ctx.Context, deviceConfig, deviceCallbacks)
 	if err != nil {
 		return err

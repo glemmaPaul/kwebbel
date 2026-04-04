@@ -25,7 +25,6 @@ type Group struct {
 
 type ConnectionManager struct {
 	activeGroup *Group
-	host        host.Host
 	streams     map[peer.ID]network.Stream
 	mu          sync.RWMutex
 }
@@ -33,11 +32,11 @@ type ConnectionManager struct {
 func NewConnectionManager(host host.Host) *ConnectionManager {
 	return &ConnectionManager{
 		activeGroup: nil,
-		host:        host,
+		streams:     make(map[peer.ID]network.Stream),
 	}
 }
 
-func (cm *ConnectionManager) DialPeers(ctx context.Context, destinations []string) error {
+func (cm *ConnectionManager) DialPeers(ctx context.Context, host host.Host, destinations []string) error {
 	streams := make(map[peer.ID]network.Stream)
 	for _, destination := range destinations {
 		// 1. Parse the string as a Multiaddress
@@ -54,18 +53,18 @@ func (cm *ConnectionManager) DialPeers(ctx context.Context, destinations []strin
 		}
 
 		// Relay connections are "limited" - must opt-in to use them for streams
-		cm.host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
+		host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
 
 		log.Printf("Attempting to dial: %s", info.ID)
 
-		stream, err := cm.host.NewStream(network.WithAllowLimitedConn(ctx, string(VoiceProtocol)), info.ID, VoiceProtocol)
+		stream, err := host.NewStream(network.WithAllowLimitedConn(ctx, string(VoiceProtocol)), info.ID, VoiceProtocol)
 		if err != nil {
 			log.Println("Error creating stream to", info.ID, err)
 			return err
 		}
 		streams[info.ID] = stream
 
-		roomStream, err := cm.host.NewStream(network.WithAllowLimitedConn(ctx, string(rooms.RoomProtocol)), info.ID, rooms.RoomProtocol)
+		roomStream, err := host.NewStream(network.WithAllowLimitedConn(ctx, string(rooms.RoomProtocol)), info.ID, rooms.RoomProtocol)
 		if err != nil {
 			log.Println("Error creating message stream to", info.ID, err)
 			return err
@@ -78,6 +77,12 @@ func (cm *ConnectionManager) DialPeers(ctx context.Context, destinations []strin
 	cm.streams = streams
 	log.Println("Dialed", len(streams), "peers")
 	return nil
+}
+
+func (cm *ConnectionManager) IsDialed(peerID peer.ID) bool {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.streams[peerID] != nil
 }
 
 /*
