@@ -1,11 +1,19 @@
 package main
 
 import (
+	"bufio"
+	"flag"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
+	"github.com/kwebbelkorp/kwebbel/identity"
 	"github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/network"
 	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
@@ -13,6 +21,9 @@ import (
 )
 
 func main() {
+	privateKeyFile := flag.String("private-key-file", "", "path to identity seed file (encrypted or plain)")
+	privateKeyPassphrase := flag.String("private-key-passphrase", "", "passphrase for encrypted identity seed file")
+	flag.Parse()
 
 	// Tune limits for my cheap hetzner
 	scalingLimits := rcmgr.DefaultLimits
@@ -29,14 +40,52 @@ func main() {
 	}
 
 	resources := relay.DefaultResources()
-	resources.Limit.Data = 1 << 30           // 1 GB per connection (basically unlimited for voice)
+	resources.Limit.Data = 256 << 20         // 256MB per connection
 	resources.Limit.Duration = 1 * time.Hour // 1 hour
 
-	host, err := libp2p.New(
+	opts := []libp2p.Option{
 		libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/4242", "/ip4/0.0.0.0/udp/4242/quic-v1"),
 		libp2p.ResourceManager(limiter),
 		libp2p.ForceReachabilityPublic(),
-	)
+	}
+
+	if *privateKeyFile != "" {
+		passphrase := strings.TrimSpace(*privateKeyPassphrase)
+
+		keyFileExists, err := fileExists(*privateKeyFile)
+		if err != nil {
+			panic(err)
+		}
+
+		if !keyFileExists {
+			if passphrase == "" {
+				fmt.Print("New key passphrase (press Enter for none): ")
+				reader := bufio.NewReader(os.Stdin)
+				input, err := reader.ReadString('\n')
+				if err == nil {
+					passphrase = strings.TrimSpace(input)
+				}
+			}
+			if err := createRelaySeedFile(*privateKeyFile, passphrase); err != nil {
+				panic(err)
+			}
+		} else if passphrase == "" {
+			fmt.Print("Passphrase (press Enter for none): ")
+			reader := bufio.NewReader(os.Stdin)
+			input, err := reader.ReadString('\n')
+			if err == nil {
+				passphrase = strings.TrimSpace(input)
+			}
+		}
+
+		privKey, err := loadRelayPrivateKey(*privateKeyFile, passphrase)
+		if err != nil {
+			panic(err)
+		}
+		opts = append(opts, libp2p.Identity(privKey))
+	}
+
+	host, err := libp2p.New(opts...)
 	if err != nil {
 		panic(err)
 	}
@@ -70,4 +119,65 @@ func (n *relayNotifier) Connected(net network.Network, c network.Conn) {
 }
 func (n *relayNotifier) Disconnected(net network.Network, c network.Conn) {
 	log.Printf("Relay: peer disconnected: %s", c.RemotePeer())
+}
+
+func loadRelayPrivateKey(privateKeyFile string, passphrase string) (crypto.PrivKey, error) {
+	seed, err := identity.LoadSeed(privateKeyFile, passphrase)
+	if err != nil {
+		if passphrase == "" {
+			return nil, fmt.Errorf("failed to load relay key file %q (if encrypted, pass --private-key-passphrase): %w", privateKeyFile, err)
+		}
+		return nil, err
+	}
+
+	im, err := identity.LoadFromBytes(seed)
+	if err != nil {
+		return nil, err
+	}
+
+	return im.MasterPrivateKey()
+}
+
+func fileExists(filename string) (bool, error) {
+	_, err := os.Stat(filename)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func createRelaySeedFile(privateKeyFile string, passphrase string) error {
+	im, err := identity.NewIdentityManager()
+	if err != nil {
+		return err
+	}
+
+	parentDir := filepath.Dir(privateKeyFile)
+	if parentDir != "." {
+		if err := os.MkdirAll(parentDir, 0700); err != nil {
+			return err
+		}
+	}
+
+	seed := im.ExportMasterSeed()
+	if passphrase == "" {
+		if err := os.WriteFile(privateKeyFile, seed, 0600); err != nil {
+			return err
+		}
+	} else {
+		if err := identity.SaveEncrypted(privateKeyFile, seed, passphrase); err != nil {
+			return err
+		}
+	}
+
+	masterPublicKey, err := im.GetMasterPublicID()
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Created new relay identity at %s (peer id: %s)", privateKeyFile, masterPublicKey)
+	return nil
 }

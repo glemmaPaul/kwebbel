@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"sync"
@@ -45,6 +46,14 @@ type WebRTCAudioBridge struct {
 	mu     sync.RWMutex
 	peers  map[peer.ID]*webrtcPeerState
 	closed chan struct{}
+
+	allowMu         sync.RWMutex
+	allowedPeerSet  map[peer.ID]struct{}
+	allowListActive bool
+
+	managedMu   sync.RWMutex
+	managedPeer map[peer.ID]*managedPeerState
+	retryPolicy RetryPolicy
 }
 type webrtcPeerState struct {
 	pc               *webrtc.PeerConnection
@@ -53,6 +62,34 @@ type webrtcPeerState struct {
 	encoderMu        sync.Mutex
 	trackMu          sync.Mutex
 	publishedPackets uint64
+}
+
+type RetryPolicy struct {
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+	RetryInterval  time.Duration
+	DialTimeout    time.Duration
+	ConnectTimeout time.Duration
+}
+
+type managedPeerState struct {
+	info            peer.AddrInfo
+	connected       bool
+	dialing         bool
+	retryCount      int
+	nextAttempt     time.Time
+	lastError       string
+	lastConnectedAt time.Time
+}
+
+type PeerConnectionStatus struct {
+	PeerID          peer.ID
+	Connected       bool
+	Dialing         bool
+	RetryCount      int
+	NextAttempt     time.Time
+	LastError       string
+	LastConnectedAt time.Time
 }
 
 func NewWebRTCAudioBridge(h host.Host, mixer *audio.Mixer) *WebRTCAudioBridge {
@@ -64,10 +101,21 @@ func NewWebRTCAudioBridge(h host.Host, mixer *audio.Mixer) *WebRTCAudioBridge {
 		mixer:  mixer,
 		peers:  make(map[peer.ID]*webrtcPeerState),
 		closed: make(chan struct{}),
+
+		allowedPeerSet: make(map[peer.ID]struct{}),
+		managedPeer:    make(map[peer.ID]*managedPeerState),
+		retryPolicy: RetryPolicy{
+			InitialBackoff: 1 * time.Second,
+			MaxBackoff:     30 * time.Second,
+			RetryInterval:  1 * time.Second,
+			DialTimeout:    8 * time.Second,
+			ConnectTimeout: 6 * time.Second,
+		},
 	}
 	// Accept incoming signaling requests from peers.
 	h.SetStreamHandler(WebRTCSignalProtocol, b.handleIncomingSignalStream)
 	b.logf("bridge initialized, signaling protocol=%s", WebRTCSignalProtocol)
+	go b.reconcileManagedPeers()
 	return b
 }
 
@@ -76,6 +124,96 @@ func (b *WebRTCAudioBridge) SetLogger(logger *log.Logger) {
 		return
 	}
 	b.logger = logger
+}
+
+func (b *WebRTCAudioBridge) TrackAllowedPeers() {
+	b.allowMu.RLock()
+	ids := make([]peer.ID, 0, len(b.allowedPeerSet))
+	for id := range b.allowedPeerSet {
+		ids = append(ids, id)
+	}
+	b.allowMu.RUnlock()
+
+	for _, id := range ids {
+		if id == b.host.ID() {
+			continue
+		}
+		b.TrackPeer(peer.AddrInfo{ID: id})
+	}
+}
+
+// SetAllowedPeers replaces the active allowlist.
+// When called, incoming/outgoing signaling is restricted to this set.
+func (b *WebRTCAudioBridge) SetAllowedPeers(peers []peer.ID) {
+	next := make(map[peer.ID]struct{}, len(peers))
+	for _, id := range peers {
+		next[id] = struct{}{}
+	}
+
+	b.allowMu.Lock()
+	b.allowedPeerSet = next
+	b.allowListActive = true
+	b.allowMu.Unlock()
+
+	b.logf("updated allowlist peer_count=%d", len(peers))
+}
+
+// AllowPeer adds one peer to the allowlist and activates filtering.
+func (b *WebRTCAudioBridge) AllowPeer(id peer.ID) {
+	b.allowMu.Lock()
+	b.allowedPeerSet[id] = struct{}{}
+	b.allowListActive = true
+	b.allowMu.Unlock()
+}
+
+// TrackPeer ensures the bridge keeps this peer connected, retrying with backoff.
+func (b *WebRTCAudioBridge) TrackPeer(remote peer.AddrInfo) {
+	if remote.ID == b.host.ID() {
+		b.logf("ignoring self peer in TrackPeer peer=%s", remote.ID)
+		return
+	}
+
+	b.managedMu.Lock()
+	defer b.managedMu.Unlock()
+
+	if existing, ok := b.managedPeer[remote.ID]; ok {
+		existing.info = remote
+		if existing.nextAttempt.IsZero() {
+			existing.nextAttempt = time.Now()
+		}
+		return
+	}
+
+	b.managedPeer[remote.ID] = &managedPeerState{
+		info:        remote,
+		nextAttempt: time.Now(),
+	}
+	b.logf("tracking peer=%s for connection retries", remote.ID)
+}
+
+func (b *WebRTCAudioBridge) UntrackPeer(id peer.ID) {
+	b.managedMu.Lock()
+	delete(b.managedPeer, id)
+	b.managedMu.Unlock()
+}
+
+func (b *WebRTCAudioBridge) PeerStatus(id peer.ID) (PeerConnectionStatus, bool) {
+	b.managedMu.RLock()
+	defer b.managedMu.RUnlock()
+
+	mp, ok := b.managedPeer[id]
+	if !ok {
+		return PeerConnectionStatus{}, false
+	}
+	return PeerConnectionStatus{
+		PeerID:          id,
+		Connected:       mp.connected,
+		Dialing:         mp.dialing,
+		RetryCount:      mp.retryCount,
+		NextAttempt:     mp.nextAttempt,
+		LastError:       mp.lastError,
+		LastConnectedAt: mp.lastConnectedAt,
+	}, true
 }
 
 // StartPublishing forwards 20ms Opus packets from AudioEgress.Output to all
@@ -102,6 +240,12 @@ func (b *WebRTCAudioBridge) StartPublishing(ctx context.Context, opusPackets <-c
 // the offer/answer flow for one peer.
 func (b *WebRTCAudioBridge) DialAndNegotiate(ctx context.Context, remote peer.AddrInfo) error {
 	b.logf("dial and negotiate start with peer=%s", remote.ID)
+	if remote.ID == b.host.ID() {
+		return errors.New("refusing to dial self")
+	}
+	if !b.isPeerAllowed(remote.ID) {
+		return fmt.Errorf("peer %s not in allowlist", remote.ID)
+	}
 	b.host.Peerstore().AddAddrs(remote.ID, remote.Addrs, peerstore.PermanentAddrTTL)
 	if err := b.host.Connect(ctx, remote); err != nil {
 		return err
@@ -141,6 +285,11 @@ func (b *WebRTCAudioBridge) DialAndNegotiate(ctx context.Context, remote peer.Ad
 }
 func (b *WebRTCAudioBridge) handleIncomingSignalStream(stream network.Stream) {
 	remoteID := stream.Conn().RemotePeer()
+	if !b.isPeerAllowed(remoteID) {
+		b.logf("rejected signaling stream from non-allowed peer=%s", remoteID)
+		_ = stream.Reset()
+		return
+	}
 	b.logf("incoming signaling stream from peer=%s", remoteID)
 	if _, err := b.createPeerState(remoteID, stream); err != nil {
 		b.logf("webrtc peer setup failed for %s: %v", remoteID, err)
@@ -247,6 +396,7 @@ func (b *WebRTCAudioBridge) createPeerState(remoteID peer.ID, stream network.Str
 	})
 	pc.OnConnectionStateChange(func(cs webrtc.PeerConnectionState) {
 		b.logf("peer connection state peer=%s state=%s", remoteID, cs.String())
+		b.updateManagedPeerState(remoteID, cs)
 		if cs == webrtc.PeerConnectionStateFailed ||
 			cs == webrtc.PeerConnectionStateDisconnected ||
 			cs == webrtc.PeerConnectionStateClosed {
@@ -428,4 +578,153 @@ func (b *WebRTCAudioBridge) readRemoteTrack(remoteID peer.ID, track *webrtc.Trac
 		copy(samples, pcmBuffer[:n])
 		b.mixer.PushAudio(remoteID.String(), samples)
 	}
+}
+
+func (b *WebRTCAudioBridge) reconcileManagedPeers() {
+	ticker := time.NewTicker(b.retryPolicy.RetryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-b.closed:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			toDial := make([]peer.AddrInfo, 0)
+
+			b.managedMu.Lock()
+			for id, mp := range b.managedPeer {
+				if id == b.host.ID() {
+					continue
+				}
+				if !b.isPeerAllowed(id) {
+					continue
+				}
+				if mp.connected || mp.dialing {
+					continue
+				}
+				if !mp.nextAttempt.IsZero() && now.Before(mp.nextAttempt) {
+					continue
+				}
+				if b.peerConnectionIsAlive(id) {
+					continue
+				}
+
+				mp.dialing = true
+				toDial = append(toDial, mp.info)
+			}
+			b.managedMu.Unlock()
+
+			for _, info := range toDial {
+				go b.dialManagedPeer(info)
+			}
+		}
+	}
+}
+
+func (b *WebRTCAudioBridge) dialManagedPeer(info peer.AddrInfo) {
+	ctx, cancel := context.WithTimeout(context.Background(), b.retryPolicy.DialTimeout)
+	defer cancel()
+
+	err := b.DialAndNegotiate(ctx, info)
+	if err != nil {
+		b.markManagedDialFailure(info.ID, err)
+		return
+	}
+	b.markManagedDialStarted(info.ID)
+}
+
+func (b *WebRTCAudioBridge) markManagedDialStarted(id peer.ID) {
+	b.managedMu.Lock()
+	defer b.managedMu.Unlock()
+
+	mp, ok := b.managedPeer[id]
+	if !ok {
+		return
+	}
+	mp.dialing = false
+	// Give handshake some time; if we never reach Connected, try again.
+	mp.nextAttempt = time.Now().Add(b.retryPolicy.ConnectTimeout)
+	mp.lastError = ""
+}
+
+func (b *WebRTCAudioBridge) markManagedDialFailure(id peer.ID, err error) {
+	b.managedMu.Lock()
+	defer b.managedMu.Unlock()
+
+	mp, ok := b.managedPeer[id]
+	if !ok {
+		return
+	}
+	mp.dialing = false
+	mp.connected = false
+	mp.retryCount++
+	mp.lastError = err.Error()
+	backoff := b.retryBackoff(mp.retryCount)
+	mp.nextAttempt = time.Now().Add(backoff)
+	b.logf("dial failed peer=%s retries=%d next_attempt_in=%s err=%v", id, mp.retryCount, backoff, err)
+}
+
+func (b *WebRTCAudioBridge) updateManagedPeerState(id peer.ID, state webrtc.PeerConnectionState) {
+	b.managedMu.Lock()
+	defer b.managedMu.Unlock()
+
+	mp, ok := b.managedPeer[id]
+	if !ok {
+		return
+	}
+
+	switch state {
+	case webrtc.PeerConnectionStateConnected:
+		mp.connected = true
+		mp.dialing = false
+		mp.retryCount = 0
+		mp.lastError = ""
+		mp.lastConnectedAt = time.Now()
+		mp.nextAttempt = time.Time{}
+	case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateDisconnected:
+		mp.connected = false
+		mp.dialing = false
+		if mp.nextAttempt.IsZero() || mp.nextAttempt.After(time.Now().Add(b.retryPolicy.InitialBackoff)) {
+			mp.nextAttempt = time.Now().Add(b.retryPolicy.InitialBackoff)
+		}
+	case webrtc.PeerConnectionStateClosed:
+		mp.connected = false
+		mp.dialing = false
+		mp.nextAttempt = time.Now().Add(b.retryPolicy.InitialBackoff)
+	}
+}
+
+func (b *WebRTCAudioBridge) retryBackoff(retries int) time.Duration {
+	if retries <= 0 {
+		return b.retryPolicy.InitialBackoff
+	}
+	backoff := b.retryPolicy.InitialBackoff
+	for i := 1; i < retries; i++ {
+		backoff *= 2
+		if backoff >= b.retryPolicy.MaxBackoff {
+			return b.retryPolicy.MaxBackoff
+		}
+	}
+	return backoff
+}
+
+func (b *WebRTCAudioBridge) peerConnectionIsAlive(id peer.ID) bool {
+	state, ok := b.getPeerState(id)
+	if !ok || state == nil || state.pc == nil {
+		return false
+	}
+	cs := state.pc.ConnectionState()
+	return cs == webrtc.PeerConnectionStateConnecting || cs == webrtc.PeerConnectionStateConnected
+}
+
+func (b *WebRTCAudioBridge) isPeerAllowed(id peer.ID) bool {
+	b.allowMu.RLock()
+	defer b.allowMu.RUnlock()
+
+	if !b.allowListActive {
+		return true
+	}
+	_, ok := b.allowedPeerSet[id]
+	return ok
 }

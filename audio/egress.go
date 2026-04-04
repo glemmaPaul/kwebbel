@@ -34,7 +34,6 @@ func (t *AudioEgress) StartProcessing() {
 		opusBuffer := make([]byte, 1000)
 
 		for rawBytes := range t.Input {
-			// 2. Convert []byte (Malgo) to []int16 (Opus)
 			pcmData := BytesToInt16(rawBytes)
 
 			// Opus expects fixed frame size for this setup (20ms @ 48kHz mono).
@@ -43,7 +42,6 @@ func (t *AudioEgress) StartProcessing() {
 				continue
 			}
 
-			// 4. Encode
 			n, err := enc.Encode(pcmData, opusBuffer)
 			if err != nil {
 				log.Printf("Opus encode error: %v", err)

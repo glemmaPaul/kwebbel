@@ -5,8 +5,12 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // SaveEncrypted saves the 32-byte seed to a file, encrypted by password
@@ -70,4 +74,43 @@ func LoadEncrypted(filename string, password string) ([]byte, error) {
 	}
 
 	return seed, nil
+}
+
+// LoadSeed reads an identity seed from disk.
+// Supported formats:
+//   - raw binary 32-byte seed
+//   - 64-char hex seed
+//   - base64-encoded 32-byte seed
+//   - encrypted seed file created by SaveEncrypted
+func LoadSeed(filename string, password string) ([]byte, error) {
+	if password != "" {
+		return LoadEncrypted(filename, password)
+	}
+
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(data) == 32 {
+		seed := make([]byte, 32)
+		copy(seed, data)
+		return seed, nil
+	}
+
+	trimmed := strings.TrimSpace(string(data))
+	if decoded, err := hex.DecodeString(trimmed); err == nil && len(decoded) == 32 {
+		return decoded, nil
+	}
+
+	if decoded, err := base64.StdEncoding.DecodeString(trimmed); err == nil && len(decoded) == 32 {
+		return decoded, nil
+	}
+
+	seed, err := LoadEncrypted(filename, "")
+	if err == nil {
+		return seed, nil
+	}
+
+	return nil, fmt.Errorf("unsupported key file format: expected raw/hex/base64 32-byte seed or encrypted seed")
 }

@@ -83,9 +83,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := bridge.DialAndNegotiate(ctx, *remoteInfo); err != nil {
-		log.Fatal(err)
-	}
+	bridge.TrackPeer(*remoteInfo)
 
 	samples, err := loadMP3AsMono48k(*mp3Path)
 	if err != nil {

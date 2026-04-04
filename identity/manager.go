@@ -68,7 +68,7 @@ func (im *IdentityManager) DeriveRoomKey(id string, roomName string) (libp2pcryp
 }
 
 // Returns a representation of the master public key
-func (im *IdentityManager) GetMasterPublicID() string {
+func (im *IdentityManager) GetMasterPublicID() (peer.ID, error) {
 	// Re-generate the standard Go key from the seed
 	stdKey := ed25519.NewKeyFromSeed(im.masterSeed)
 
@@ -77,16 +77,16 @@ func (im *IdentityManager) GetMasterPublicID() string {
 	// We only care about the Public Key (second return value) here
 	_, pubKey, err := libp2pcrypto.KeyPairFromStdKey(&stdKey)
 	if err != nil {
-		return "error-generating-key"
+		return peer.ID(""), err
 	}
 
 	// Convert Public Key -> Peer ID
 	id, err := peer.IDFromPublicKey(pubKey)
 	if err != nil {
-		return "error-calculating-id"
+		return peer.ID(""), err
 	}
 
-	return id.String()
+	return id, nil
 }
 
 // ExportMasterSeed returns the raw bytes to save to disk (encrypt this!)
@@ -95,4 +95,14 @@ func (im *IdentityManager) ExportMasterSeed() []byte {
 	clone := make([]byte, 32)
 	copy(clone, im.masterSeed)
 	return clone
+}
+
+// MasterPrivateKey returns the libp2p private key from the master seed.
+func (im *IdentityManager) MasterPrivateKey() (libp2pcrypto.PrivKey, error) {
+	stdKey := ed25519.NewKeyFromSeed(im.masterSeed)
+	privKey, _, err := libp2pcrypto.KeyPairFromStdKey(&stdKey)
+	if err != nil {
+		return nil, err
+	}
+	return privKey, nil
 }

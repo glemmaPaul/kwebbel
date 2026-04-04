@@ -47,13 +47,32 @@ func (mc *MCServer) AttachStream(s network.Stream) {
 	log.Println("Received room message stream from", s.Conn().RemotePeer())
 	// Check if the peer stream is allowed in peers
 	peerID := s.Conn().RemotePeer()
+	if mc.activeRoom != nil {
+		mc.activeRoom.AddPeer(peerID)
+	}
+	mc.mu.Lock()
 	if _, ok := mc.streams[peerID]; ok {
+		mc.mu.Unlock()
 		log.Println("Peer stream already exists", peerID)
 		return
 	}
 	mc.streams[peerID] = s
+	mc.mu.Unlock()
 
-	go mc.HandleLobbyBus(context.Background(), s)
+	go func() {
+		defer func() {
+			mc.mu.Lock()
+			delete(mc.streams, peerID)
+			mc.mu.Unlock()
+			if mc.activeRoom != nil {
+				mc.activeRoom.RemovePeer(peerID)
+			}
+		}()
+
+		if err := mc.HandleLobbyBus(context.Background(), s); err != nil {
+			log.Printf("room stream ended for %s: %v", peerID, err)
+		}
+	}()
 }
 
 func (mc *MCServer) HandleLobbyBus(context context.Context, s network.Stream) error {
@@ -74,24 +93,35 @@ func (mc *MCServer) HandleLobbyBus(context context.Context, s network.Stream) er
 	}
 }
 
-func (mc *MCServer) AllowedPeersStreams() map[peer.ID]network.Stream {
+func (mc *MCServer) allowedPeerStreams() map[peer.ID]network.Stream {
 	if mc.activeRoom == nil {
 		return make(map[peer.ID]network.Stream)
 	}
 
 	allowedPeers := mc.activeRoom.GetPeers()
 	streams := make(map[peer.ID]network.Stream)
+
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
 	for _, peerID := range allowedPeers {
-		streams[peerID] = mc.streams[peerID]
+		stream, ok := mc.streams[peerID]
+		if !ok || stream == nil {
+			continue
+		}
+		streams[peerID] = stream
 	}
 	return streams
 }
 
 func (mc *MCServer) _broadcast(msg LobbyMessage, streams map[peer.ID]network.Stream) {
 	for id, stream := range streams {
+		if stream == nil {
+			continue
+		}
 		enc := json.NewEncoder(stream)
 		if err := enc.Encode(msg); err != nil {
-			log.Printf("Failed to update peer %s", id.String())
+			log.Printf("Failed to update peer %s: %v", id.String(), err)
 		}
 	}
 }
@@ -114,7 +144,7 @@ func (mc *MCServer) BroadcastPeerList() {
 		},
 	}
 
-	mc._broadcast(update, mc.AllowedPeersStreams())
+	mc._broadcast(update, mc.allowedPeerStreams())
 }
 
 func (mc *MCServer) Heartbeat(ctx context.Context) error {

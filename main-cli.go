@@ -61,6 +61,7 @@ func main() {
 
 	if *connectTo == "" {
 		room := rooms.NewRoom("default")
+		room.AddPeer(peer.ID(host.ID()))
 		mcServer := rooms.NewMCServer(room)
 		mcServer.Serve()
 		host.SetStreamHandler(rooms.RoomProtocol, mcServer.AttachStream)
@@ -136,12 +137,10 @@ func main() {
 
 		// Relay connections are "limited" - must opt-in to use them for streams
 		host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
-
-		log.Printf("Attempting WebRTC negotiation with: %s", info.ID)
-		if err := webrtcBridge.DialAndNegotiate(context.Background(), *info); err != nil {
-			log.Println("Error starting WebRTC negotiation with", info.ID, err)
-			log.Fatal(err)
-		}
+		// Bootstrap allowlist so initial negotiation to room host is possible.
+		webrtcBridge.AllowPeer(info.ID)
+		webrtcBridge.TrackPeer(*info)
+		log.Printf("Tracking peer for WebRTC retries: %s", info.ID)
 
 		log.Printf("Opening room stream to: %s", info.ID)
 		roomStream, err := host.NewStream(network.WithAllowLimitedConn(context.Background(), string(rooms.RoomProtocol)), info.ID, rooms.RoomProtocol)
@@ -153,6 +152,8 @@ func main() {
 		signals := &rooms.RoomListenerSignals{
 			OnUpdatedAllowedPeers: func(peers []peer.ID) {
 				log.Println("Allowed peers updated:", peers)
+				webrtcBridge.SetAllowedPeers(peers)
+				webrtcBridge.TrackAllowedPeers()
 			},
 		}
 		listener := rooms.NewRoomListener(roomStream, signals)
