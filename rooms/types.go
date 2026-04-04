@@ -1,0 +1,15 @@
+package rooms
+
+type JoinRequest struct {
+	PeerID string `json:"peer_id"`
+	Ticket string `json:"ticket"`
+}
+
+type PeerInfo struct {
+	PeerID         string `json:"peer_id"`
+	ConnectionAddr string `json:"connection_addr"`
+}
+
+type PeerUpdate struct {
+	Members []PeerInfo `json:"members"`
+}
