@@ -88,6 +88,7 @@ func (mc *MCServer) HandleLobbyBus(context context.Context, s network.Stream) er
 		switch msg.Type {
 		case "request-to-join":
 			log.Println("Request to join room", msg.Payload)
+			// TODO: Implement ticket validation
 			encoder.Encode(LobbyMessage{Type: "allowed-to-join", Payload: true})
 		}
 	}
@@ -105,11 +106,9 @@ func (mc *MCServer) allowedPeerStreams() map[peer.ID]network.Stream {
 	defer mc.mu.RUnlock()
 
 	for _, peerID := range allowedPeers {
-		stream, ok := mc.streams[peerID]
-		if !ok || stream == nil {
-			continue
+		if stream, ok := mc.streams[peerID]; ok {
+			streams[peerID] = stream
 		}
-		streams[peerID] = stream
 	}
 	return streams
 }

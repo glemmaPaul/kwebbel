@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -19,12 +18,14 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
-	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	"github.com/multiformats/go-multiaddr"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
 func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	ch := make(chan os.Signal, 1)
 	connectTo := flag.String("connect-to", "", "address to connect to")
 	useRelay := flag.Bool("use-relay", true, "use relay")
@@ -72,46 +73,29 @@ func main() {
 	}
 
 	if *useRelay {
-		peerId, err := peer.Decode(*relayPeerId)
+		relayId, err := peer.Decode(*relayPeerId)
 		if err != nil {
 			log.Fatal(err)
 		}
 		//serverStr := *relayAddr
-		server := peer.AddrInfo{
-			ID: peerId,
+		relayInfo := peer.AddrInfo{
+			ID: relayId,
 			Addrs: []ma.Multiaddr{
 				ma.StringCast("/ip4/89.167.83.252/udp/4242/quic-v1"),
 				ma.StringCast("/ip4/89.167.83.252/tcp/4242"),
 			},
 		}
-		hostErr := host.Connect(context.Background(), server)
-		if hostErr != nil {
-			log.Fatal(hostErr)
-		}
-
-		host.Peerstore().AddAddrs(server.ID, server.Addrs, peerstore.PermanentAddrTTL)
-
-		// 1. Request the reservation
-		_, err = client.Reserve(context.Background(), host, server)
+		relayManager := conn.NewRelayManager(host)
+		err = relayManager.Connect(ctx, relayInfo)
 		if err != nil {
-			log.Fatal("Reservation failed:", err)
-		}
-		log.Println("✅ Reservation request accepted by relay")
-
-		// 5. WAIT for the address to appear
-		log.Println("Waiting for relay address...")
-		for i := 0; i < 1; i++ {
-			time.Sleep(1 * time.Second)
-			for _, addr := range host.Addrs() {
-				if strings.Contains(addr.String(), "p2p-circuit") {
-					fmt.Printf("🚀 SUCCESS! REACHABLE AT: %s/p2p/%s\n", addr, host.ID())
-					break
-				}
-			}
+			log.Fatal(err)
 		}
 
-		relayaddr, _ := multiaddr.NewMultiaddr("/p2p/" + server.ID.String() + "/p2p-circuit/p2p/" + host.ID().String())
-		log.Println("Relay address:", relayaddr.String())
+		available := relayManager.Available()
+		for _, relay := range available {
+			relayaddr, _ := multiaddr.NewMultiaddr("/p2p/" + relay.ID.String() + "/p2p-circuit/p2p/" + host.ID().String())
+			log.Println("Relay address:", relayaddr.String())
+		}
 	}
 
 	audioEgress, err := kwebbelaar.StartAudioEgress()
