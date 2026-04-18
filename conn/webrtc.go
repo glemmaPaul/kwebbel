@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hraban/opus"
+	"github.com/jj11hh/opus"
 	"github.com/kwebbelkorp/kwebbel/audio"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"

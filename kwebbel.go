@@ -29,7 +29,7 @@ func main() {
 	ch := make(chan os.Signal, 1)
 	connectTo := flag.String("connect-to", "", "address to connect to")
 	useRelay := flag.Bool("use-relay", true, "use relay")
-	relayPeerId := flag.String("relay-peer-id", "12D3KooWBEwfTB5mbZ3qBfxanPvuEzFHwEE6tSnaPqgqEHvyfSgB", "relay peer id")
+	relayPeerId := flag.String("relay-peer-id", "12D3KooWNCttbqRdEeF1vaSuZBKns61jmzzGRp5DZuU1wpYsWg72", "relay peer id")
 
 	flag.Parse()
 

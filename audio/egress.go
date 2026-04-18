@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"log"
 
-	"github.com/hraban/opus"
+	"github.com/jj11hh/opus"
 )
 
 type AudioEgress struct {
