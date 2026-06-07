@@ -93,7 +93,7 @@ func main() {
 
 	rawPCM := make(chan []byte, 128)
 	egress := audio.NewAudioEgress(rawPCM)
-	egress.StartProcessing()
+	egress.Start()
 	bridge.StartPublishing(ctx, egress.Output)
 	go loopPCM(ctx, samples, rawPCM)
 

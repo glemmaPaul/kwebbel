@@ -20,6 +20,11 @@ type RoomListenerSignals struct {
 	OnUpdatedAllowedPeers func(peers []peer.ID)
 }
 
+type listenerMessage struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
 func NewRoomListener(stream network.Stream, signals *RoomListenerSignals) *RoomListener {
 	if signals == nil {
 		signals = &RoomListenerSignals{}
@@ -33,43 +38,57 @@ func NewRoomListener(stream network.Stream, signals *RoomListenerSignals) *RoomL
 
 func (rl *RoomListener) Start() {
 	decoder := json.NewDecoder(rl.stream)
-	go func() {
-		defer rl.stream.Close()
-		for {
-			var msg struct {
-				Type    string          `json:"type"`
-				Payload json.RawMessage `json:"payload"`
-			}
-			if err := decoder.Decode(&msg); err != nil {
-				log.Printf("room listener stream ended: %v", err)
-				return
-			}
+	go rl.listen(decoder)
+}
 
-			if msg.Type != "current-allowed-peers" {
-				continue
-			}
+func (rl *RoomListener) Stop() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.allowedPeers = make(map[peer.ID]struct{})
+}
 
-			var update PeerUpdate
-			if err := json.Unmarshal(msg.Payload, &update); err != nil {
-				log.Printf("room listener payload parse failed: %v", err)
-				continue
-			}
-
-			peers := make([]peer.ID, 0, len(update.Members))
-			for _, member := range update.Members {
-				id, err := peer.Decode(member.PeerID)
-				if err != nil {
-					continue
-				}
-				peers = append(peers, id)
-			}
-			rl.setAllowedPeers(peers)
-
-			if rl.signals != nil && rl.signals.OnUpdatedAllowedPeers != nil {
-				rl.signals.OnUpdatedAllowedPeers(peers)
-			}
+func (rl *RoomListener) listen(decoder *json.Decoder) {
+	defer rl.stream.Close()
+	for {
+		var msg listenerMessage
+		if err := decoder.Decode(&msg); err != nil {
+			log.Printf("room listener stream ended: %v", err)
+			return
 		}
-	}()
+
+		switch msg.Type {
+		case "current-allowed-peers":
+			if err := rl.onUpdateAllowedPeers(msg); err != nil {
+				log.Printf("room listener update allowed peers failed: %v", err)
+			}
+		default:
+			continue
+		}
+
+	}
+}
+
+func (rl *RoomListener) onUpdateAllowedPeers(msg listenerMessage) error {
+	var update PeerUpdate
+	if err := json.Unmarshal(msg.Payload, &update); err != nil {
+		log.Printf("room listener payload parse failed: %v", err)
+		return err
+	}
+
+	peers := make([]peer.ID, 0, len(update.Members))
+	for _, member := range update.Members {
+		id, err := peer.Decode(member.PeerID)
+		if err != nil {
+			continue
+		}
+		peers = append(peers, id)
+	}
+	rl.setAllowedPeers(peers)
+
+	if rl.signals != nil && rl.signals.OnUpdatedAllowedPeers != nil {
+		rl.signals.OnUpdatedAllowedPeers(peers)
+	}
+	return nil
 }
 
 func (rl *RoomListener) AllowedPeers() []peer.ID {

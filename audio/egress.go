@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"log"
 
-	"github.com/jj11hh/opus"
+	"gopkg.in/hraban/opus.v2"
 )
 
 type AudioEgress struct {
@@ -21,7 +21,7 @@ func NewAudioEgress(input <-chan []byte) *AudioEgress {
 	}
 }
 
-func (t *AudioEgress) StartProcessing() {
+func (t *AudioEgress) Start() {
 	// 1. Initialize Opus Encoder
 	// 48000 Hz, 1 Channel, VoIP Application type
 	enc, err := opus.NewEncoder(48000, 1, opus.AppVoIP)

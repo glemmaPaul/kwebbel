@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jj11hh/opus"
 	"github.com/kwebbelkorp/kwebbel/audio"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -19,6 +18,7 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
+	"gopkg.in/hraban/opus.v2"
 )
 
 const (

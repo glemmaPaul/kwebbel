@@ -17,10 +17,9 @@ type PeerStream struct {
 }
 
 type MCServer struct {
-	mu           sync.RWMutex
-	streams      map[peer.ID]network.Stream
-	allowedPeers []peer.ID
-	activeRoom   *Room
+	mu         sync.RWMutex
+	streams    map[peer.ID]network.Stream
+	activeRoom *Room
 }
 
 type LobbyMessage struct {
@@ -30,9 +29,8 @@ type LobbyMessage struct {
 
 func NewMCServer(room *Room) *MCServer {
 	return &MCServer{
-		streams:      make(map[peer.ID]network.Stream),
-		allowedPeers: make([]peer.ID, 0),
-		activeRoom:   room,
+		streams:    make(map[peer.ID]network.Stream),
+		activeRoom: room,
 	}
 }
 

@@ -51,7 +51,7 @@ func (k *Kwebbelaar) StartAudioEgress() (*audio.AudioEgress, error) {
 	}
 
 	egress := audio.NewAudioEgress(mic.OutputChan)
-	egress.StartProcessing()
+	egress.Start()
 	err = mic.Start()
 	if err != nil {
 		return nil, fmt.Errorf("failed to start audio input: %w", err)
