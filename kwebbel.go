@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -14,8 +15,10 @@ import (
 	"github.com/kwebbelkorp/kwebbel/conn"
 	"github.com/kwebbelkorp/kwebbel/core"
 	"github.com/kwebbelkorp/kwebbel/identity"
+	"github.com/kwebbelkorp/kwebbel/logging"
 	"github.com/kwebbelkorp/kwebbel/rooms"
 	"github.com/kwebbelkorp/kwebbel/transport"
+	"github.com/kwebbelkorp/kwebbel/tui"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
@@ -23,15 +26,23 @@ import (
 )
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	ch := make(chan os.Signal, 1)
 	connectTo := flag.String("connect-to", "", "address to connect to")
 	relayPeerId := flag.String("relay-peer-id", "12D3KooWNCttbqRdEeF1vaSuZBKns61jmzzGRp5DZuU1wpYsWg72", "relay peer id")
 	relayIp := flag.String("relay-ip", "89.167.83.252", "relay ip")
+	tuiEnabled := flag.Bool("tui", false, "enable tui")
 
 	flag.Parse()
+
+	logOutput := io.Writer(io.Discard)
+	if !*tuiEnabled {
+		logOutput = os.Stderr
+	}
+	logger := log.New(logOutput, "", log.LstdFlags)
+	log.SetOutput(logOutput)
+
+	baseCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := logging.WithLogger(baseCtx, logger)
 
 	im, err := identity.NewIdentityManager()
 	if err != nil {
@@ -52,9 +63,11 @@ func main() {
 	fmt.Println("libp2p node address:", addrs[0])
 	mixer := audio.NewMixer()
 	audioTransport := transport.NewOpusAudioTransport(mixer)
-	peerConnections := transport.NewPeerConnections(transport.DefaultRetryPolicy())
 	room := rooms.NewRoom("default")
-	wrb := transport.NewWebRTCAudioBridge(host, room, audioTransport, peerConnections)
+
+	negotiator := transport.NewWebRTCNegotiator(ctx, host, room, audioTransport)
+	peerConnections := transport.NewPeerConnections(ctx, negotiator, transport.DefaultRetryPolicy())
+	wrb := transport.NewWebRTCAudioBridge(ctx, host, room, audioTransport, peerConnections)
 	relayManager := conn.NewRelayManager(host)
 
 	kwebbelaar := core.NewKwebbelaar(host, im, wrb)
@@ -65,7 +78,7 @@ func main() {
 	}
 
 	if *connectTo == "" {
-		kwebbelaar.BecomeMC(room)
+		kwebbelaar.HostRoom(room)
 	} else {
 		host.SetStreamHandler(rooms.RoomProtocol, func(s network.Stream) {
 			log.Println("Incoming room stream from:", s.Conn().RemotePeer())
@@ -79,7 +92,9 @@ func main() {
 
 	relayInfo := conn.RelayAddrInfo(relayId, *relayIp)
 
-	err = relayManager.Connect(ctx, relayInfo)
+	relayCtx, relayCancel := context.WithTimeout(ctx, 15*time.Second)
+	err = relayManager.Connect(relayCtx, relayInfo)
+	relayCancel()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -99,7 +114,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	wrb.StartPublishing(context.Background(), audioEgress.Output)
+	wrb.StartPublishing(ctx, audioEgress.Output)
 
 	if *connectTo != "" {
 		maddr, err := multiaddr.NewMultiaddr(*connectTo)
@@ -118,38 +133,83 @@ func main() {
 		host.Peerstore().AddAddrs(connectToAddr.ID, connectToAddr.Addrs, peerstore.PermanentAddrTTL)
 
 		log.Printf("Opening room stream to: %s", connectToAddr.ID)
-		roomStream, err := host.NewStream(network.WithAllowLimitedConn(context.Background(), string(rooms.RoomProtocol)), connectToAddr.ID, rooms.RoomProtocol)
+		roomStream, err := host.NewStream(network.WithAllowLimitedConn(ctx, string(rooms.RoomProtocol)), connectToAddr.ID, rooms.RoomProtocol)
 		if err != nil {
-			log.Println("Error creating message stream to", connectToAddr.ID, err)
-			log.Fatal(err)
+			logger.Println("Error creating message stream to", connectToAddr.ID, err)
+			logger.Fatal(err)
 		}
 
 		signals := &rooms.RoomListenerSignals{
 			OnUpdatedAllowedPeers: func(peers []peer.ID) {
-				log.Println("Allowed peers updated:", peers)
+				logger.Println("Allowed peers updated:", peers)
 				wrb.SyncRoomPeers()
 			},
 		}
 		listener := rooms.NewRoomListener(roomStream, room, signals)
 
-		joinCtx, joinCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		joinCtx, joinCancel := context.WithTimeout(ctx, 10*time.Second)
 		err = listener.Join(joinCtx, rooms.JoinRequest{
 			PeerID: host.ID().String(),
 		})
 		joinCancel()
 		if err != nil {
-			log.Fatalf("Failed to join room hosted by %s: %v", connectToAddr.ID, err)
+			logger.Fatalf("Failed to join room hosted by %s: %v", connectToAddr.ID, err)
 		}
 		listener.Start()
 
-		if err := wrb.Dial(context.Background(), *connectToAddr); err != nil {
-			log.Printf("Initial WebRTC dial failed; retries remain active for %s: %v", connectToAddr.ID, err)
+		if err := wrb.Dial(ctx, *connectToAddr); err != nil {
+			logger.Printf("Initial WebRTC dial failed; retries remain active for %s: %v", connectToAddr.ID, err)
 		}
 	}
 
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-	<-ch
-	fmt.Println("Shutting down...")
+	if *tuiEnabled {
+		var ui *tui.Program
+
+		ui = tui.New(tui.Signals{
+			OnConnect: func(peerID string) {
+				go func() {
+					peerId, err := peer.Decode(peerID)
+					if err != nil {
+						ui.SetStatus("Peer ID is invalid")
+						return
+					}
+					relay, err := relayManager.TryPeer(ctx, peerId)
+					if err != nil {
+						ui.SetStatus(fmt.Sprintf("Failed to connect to %s: could not find relay", peerId.String()))
+						return
+					}
+					ui.SetStatus(fmt.Sprintf("Found connection through relay %s", relay.ID.String()))
+					time.Sleep(400 * time.Millisecond)
+					ui.EnterCall([]tui.Caller{
+						{ID: "local", Label: "You", Local: true},
+						{ID: peerId.String(), Label: "Peer"},
+					})
+				}()
+			},
+			OnMute: func() {
+				go func() {
+					audioEgress.SetMuted(!audioEgress.Muted())
+					ui.SetMuted(audioEgress.Muted())
+				}()
+			},
+			OnDisconnect: func() {
+				go func() {
+					audioEgress.SetMuted(false)
+					ui.LeaveCall()
+					ui.SetStatus("Disconnected")
+				}()
+			},
+		})
+
+		if err := ui.Run(); err != nil {
+			logger.Fatal(err)
+		}
+	} else {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+		<-ch
+	}
+	logger.Println("Shutting down...")
 	wrb.Close()
 	host.Close()
 }

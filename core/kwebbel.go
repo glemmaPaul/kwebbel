@@ -33,7 +33,7 @@ func NewKwebbelaar(host host.Host, identity *identity.IdentityManager, webrtcBri
 	}
 }
 
-func (k *Kwebbelaar) BecomeMC(room *rooms.Room) error {
+func (k *Kwebbelaar) HostRoom(room *rooms.Room) error {
 	if k.room != nil {
 		return fmt.Errorf("you are already attending a room")
 	}

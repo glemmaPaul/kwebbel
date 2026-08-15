@@ -30,6 +30,7 @@ type OpusTrack interface {
 }
 
 // OpusAudioTransport reads Opus from WebRTC tracks and forwards decoded PCM to a Pusher.
+// handles both incoming and outgoing tracks
 type OpusAudioTransport struct {
 	output Pusher
 	mu     sync.RWMutex

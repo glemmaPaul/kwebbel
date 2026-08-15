@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/pion/webrtc/v4"
 )
@@ -31,6 +32,8 @@ func DefaultRetryPolicy() RetryPolicy {
 type Negotiator interface {
 	Dial(ctx context.Context, remote peer.AddrInfo) error
 	Disconnect(id peer.ID) error
+	HandleSignalStream(stream network.Stream)
+	Events() <-chan ConnectionEvent
 }
 
 type PeerConnectionStatus struct {
@@ -45,7 +48,7 @@ type PeerConnectionStatus struct {
 }
 
 type PeerConnectionManager interface {
-	SetNegotiator(negotiator Negotiator)
+	StreamHandler() func(stream network.Stream)
 	Dial(ctx context.Context, remote peer.AddrInfo) error
 	Track(remote peer.AddrInfo)
 	SyncPeers(peers []peer.ID, self peer.ID) error
@@ -53,7 +56,6 @@ type PeerConnectionManager interface {
 	IsTracked(id peer.ID) bool
 	TrackedPeerIDs() []peer.ID
 	Status(id peer.ID) (PeerConnectionStatus, bool)
-	UpdateState(id peer.ID, state webrtc.PeerConnectionState)
 	Close()
 }
 
@@ -80,15 +82,16 @@ type PeerConnections struct {
 	closeOnce  sync.Once
 }
 
-func NewPeerConnections(policy RetryPolicy) *PeerConnections {
+func NewPeerConnections(ctx context.Context, negotiator Negotiator, policy RetryPolicy) *PeerConnections {
 	policy = normalizeRetryPolicy(policy)
-	ctx, cancel := context.WithCancel(context.Background())
+	cancelCtx, cancel := context.WithCancel(ctx)
 	p := &PeerConnections{
-		peers:  make(map[peer.ID]*managedPeerState),
-		policy: policy,
-		ctx:    ctx,
-		cancel: cancel,
-		closed: make(chan struct{}),
+		peers:      make(map[peer.ID]*managedPeerState),
+		policy:     policy,
+		negotiator: negotiator,
+		ctx:        cancelCtx,
+		cancel:     cancel,
+		closed:     make(chan struct{}),
 	}
 	go p.schedule()
 	return p
@@ -117,10 +120,10 @@ func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
 	return policy
 }
 
-func (p *PeerConnections) SetNegotiator(negotiator Negotiator) {
-	p.mu.Lock()
-	p.negotiator = negotiator
-	p.mu.Unlock()
+func (p *PeerConnections) StreamHandler() func(stream network.Stream) {
+	return func(stream network.Stream) {
+		p.negotiator.HandleSignalStream(stream)
+	}
 }
 
 func (p *PeerConnections) Dial(ctx context.Context, remote peer.AddrInfo) error {
@@ -289,16 +292,16 @@ func (p *PeerConnections) completeDial(id peer.ID, err error) {
 	state.nextAttempt = time.Now().Add(p.retryBackoff(state.retryCount))
 }
 
-func (p *PeerConnections) UpdateState(id peer.ID, connectionState webrtc.PeerConnectionState) {
+func (p *PeerConnections) updateState(event ConnectionEvent) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	state, ok := p.peers[id]
+	state, ok := p.peers[event.PeerID]
 	if !ok {
 		return
 	}
 
-	switch connectionState {
+	switch event.State {
 	case webrtc.PeerConnectionStateConnecting:
 		state.connecting = true
 		state.dialing = false
@@ -359,11 +362,23 @@ func disconnectPeers(negotiator Negotiator, ids []peer.ID) error {
 func (p *PeerConnections) schedule() {
 	ticker := time.NewTicker(p.policy.RetryInterval)
 	defer ticker.Stop()
+	events := p.negotiator.Events()
 
 	for {
 		select {
 		case <-p.closed:
 			return
+		case event, ok := <-events:
+			if !ok {
+				events = nil
+				continue
+			}
+			switch event.Kind {
+			case ConnectionEventPeerDiscovered:
+				p.Track(peer.AddrInfo{ID: event.PeerID})
+			case ConnectionEventStateChanged:
+				p.updateState(event)
+			}
 		case now := <-ticker.C:
 			for _, remote := range p.pendingDials(now) {
 				go func() {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 
+	"github.com/kwebbelkorp/kwebbel/logging"
 	"github.com/kwebbelkorp/kwebbel/rooms"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -20,47 +21,29 @@ type WebRTCAudioBridge struct {
 	room        *rooms.Room
 	audio       *OpusAudioTransport
 	connections PeerConnectionManager
-	negotiator  *WebRTCNegotiator
 	logger      *log.Logger
 	closed      chan struct{}
 }
 
 func NewWebRTCAudioBridge(
+	ctx context.Context,
 	h host.Host,
 	room *rooms.Room,
 	audioTransport *OpusAudioTransport,
-	connections PeerConnectionManager,
-) *WebRTCAudioBridge {
-	if room == nil {
-		panic("transport: WebRTCAudioBridge requires a room")
-	}
-	if connections == nil {
-		panic("transport: WebRTCAudioBridge requires peer connections")
-	}
-
-	negotiator := newWebRTCNegotiator(h, room, audioTransport, connections)
-	connections.SetNegotiator(negotiator)
+	connections PeerConnectionManager) *WebRTCAudioBridge {
+	logger := logging.FromContext(ctx)
 	bridge := &WebRTCAudioBridge{
 		host:        h,
 		room:        room,
 		audio:       audioTransport,
 		connections: connections,
-		negotiator:  negotiator,
-		logger:      log.Default(),
+		logger:      logger,
 		closed:      make(chan struct{}),
 	}
 
-	h.SetStreamHandler(WebRTCSignalProtocol, negotiator.handleIncomingSignalStream)
-	bridge.logf("bridge initialized, room=%s signaling protocol=%s", room.ID, WebRTCSignalProtocol)
+	h.SetStreamHandler(WebRTCSignalProtocol, connections.StreamHandler())
+	logger.Printf("bridge initialized, room=%s signaling p	rotocol=%s", room.ID, WebRTCSignalProtocol)
 	return bridge
-}
-
-func (b *WebRTCAudioBridge) SetLogger(logger *log.Logger) {
-	if logger == nil {
-		return
-	}
-	b.logger = logger
-	b.negotiator.SetLogger(logger)
 }
 
 // Dial delegates one guarded negotiation attempt to PeerConnections.
@@ -71,9 +54,9 @@ func (b *WebRTCAudioBridge) Dial(ctx context.Context, remote peer.AddrInfo) erro
 // SyncRoomPeers synchronizes retry tracking and active sessions with the room.
 func (b *WebRTCAudioBridge) SyncRoomPeers() {
 	if err := b.connections.SyncPeers(b.room.GetPeers(), b.host.ID()); err != nil {
-		b.logf("failed syncing room peers: %v", err)
+		b.logger.Printf("failed syncing room peers: %v", err)
 	}
-	b.logf("synced room peers room=%s peer_count=%d", b.room.ID, b.room.GetPeerCount())
+	b.logger.Printf("synced room peers room=%s peer_count=%d", b.room.ID, b.room.GetPeerCount())
 }
 
 // StartPublishing forwards 20ms Opus packets to all active WebRTC peers.
@@ -108,7 +91,6 @@ func (b *WebRTCAudioBridge) Close() {
 		close(b.closed)
 	}
 	b.connections.Close()
-	b.negotiator.Close()
 }
 
 func (b *WebRTCAudioBridge) logf(format string, args ...any) {

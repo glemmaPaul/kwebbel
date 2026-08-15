@@ -3,6 +3,7 @@ package audio
 import (
 	"encoding/binary"
 	"log"
+	"sync/atomic"
 
 	"gopkg.in/hraban/opus.v2"
 )
@@ -12,6 +13,8 @@ type AudioEgress struct {
 	Input <-chan []byte
 	// Output produces Opus packets to publish over WebRTC.
 	Output chan []byte
+
+	muted atomic.Bool
 }
 
 func NewAudioEgress(input <-chan []byte) *AudioEgress {
@@ -19,6 +22,14 @@ func NewAudioEgress(input <-chan []byte) *AudioEgress {
 		Input:  input,
 		Output: make(chan []byte, 100),
 	}
+}
+
+func (t *AudioEgress) Muted() bool {
+	return t.muted.Load()
+}
+
+func (t *AudioEgress) SetMuted(muted bool) {
+	t.muted.Store(muted)
 }
 
 func (t *AudioEgress) Start() {
@@ -40,6 +51,10 @@ func (t *AudioEgress) Start() {
 			if len(pcmData) != 960 {
 				log.Printf("Warning: Incorrect frame size: %d samples", len(pcmData))
 				continue
+			}
+
+			if t.Muted() {
+				clear(pcmData)
 			}
 
 			n, err := enc.Encode(pcmData, opusBuffer)

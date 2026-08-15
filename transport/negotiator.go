@@ -8,6 +8,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/kwebbelkorp/kwebbel/logging"
 	"github.com/kwebbelkorp/kwebbel/rooms"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -25,13 +26,26 @@ type WebRTCSignalMessage struct {
 	Error     string                     `json:"error,omitempty"`
 }
 
+type ConnectionEventKind uint8
+
+const (
+	ConnectionEventPeerDiscovered ConnectionEventKind = iota + 1
+	ConnectionEventStateChanged
+)
+
+type ConnectionEvent struct {
+	Kind   ConnectionEventKind
+	PeerID peer.ID
+	State  webrtc.PeerConnectionState
+}
+
 type WebRTCNegotiator struct {
-	host        host.Host
-	api         *webrtc.API
-	logger      *log.Logger
-	transport   *OpusAudioTransport
-	connections PeerConnectionManager
-	room        *rooms.Room
+	host      host.Host
+	api       *webrtc.API
+	logger    *log.Logger
+	transport *OpusAudioTransport
+	room      *rooms.Room
+	events    chan ConnectionEvent
 
 	mu    sync.RWMutex
 	peers map[peer.ID]*webrtcPeerState
@@ -45,20 +59,21 @@ type webrtcPeerState struct {
 	trackMu   sync.Mutex
 }
 
-func newWebRTCNegotiator(
+func NewWebRTCNegotiator(
+	ctx context.Context,
 	h host.Host,
 	room *rooms.Room,
 	audioTransport *OpusAudioTransport,
-	connections PeerConnectionManager,
 ) *WebRTCNegotiator {
+	logger := logging.FromContext(ctx)
 	return &WebRTCNegotiator{
-		host:        h,
-		api:         newWebRTCAPI(),
-		logger:      log.Default(),
-		transport:   audioTransport,
-		connections: connections,
-		room:        room,
-		peers:       make(map[peer.ID]*webrtcPeerState),
+		host:      h,
+		api:       newWebRTCAPI(),
+		logger:    logger,
+		transport: audioTransport,
+		room:      room,
+		events:    make(chan ConnectionEvent, 64),
+		peers:     make(map[peer.ID]*webrtcPeerState),
 	}
 }
 
@@ -109,6 +124,14 @@ func (n *WebRTCNegotiator) Dial(ctx context.Context, remote peer.AddrInfo) error
 	return nil
 }
 
+func (n *WebRTCNegotiator) HandleSignalStream(stream network.Stream) {
+	n.handleIncomingSignalStream(stream)
+}
+
+func (n *WebRTCNegotiator) Events() <-chan ConnectionEvent {
+	return n.events
+}
+
 func (n *WebRTCNegotiator) handleIncomingSignalStream(stream network.Stream) {
 	remoteID := stream.Conn().RemotePeer()
 	if !n.isPeerAllowed(remoteID) {
@@ -116,6 +139,7 @@ func (n *WebRTCNegotiator) handleIncomingSignalStream(stream network.Stream) {
 		_ = stream.Reset()
 		return
 	}
+	n.emit(ConnectionEvent{Kind: ConnectionEventPeerDiscovered, PeerID: remoteID})
 	n.logf("incoming signaling stream from peer=%s", remoteID)
 	if _, err := n.createPeerState(remoteID, stream); err != nil {
 		n.logf("webrtc peer setup failed for %s: %v", remoteID, err)
@@ -195,7 +219,6 @@ func (n *WebRTCNegotiator) createPeerState(remoteID peer.ID, stream network.Stre
 	if existing, ok := n.getPeerState(remoteID); ok {
 		return existing, nil
 	}
-	n.connections.Track(peer.AddrInfo{ID: remoteID})
 	pc, err := n.api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		return nil, err
@@ -224,7 +247,11 @@ func (n *WebRTCNegotiator) createPeerState(remoteID peer.ID, stream network.Stre
 	})
 	pc.OnConnectionStateChange(func(cs webrtc.PeerConnectionState) {
 		n.logf("peer connection state peer=%s state=%s", remoteID, cs.String())
-		n.connections.UpdateState(remoteID, cs)
+		n.emit(ConnectionEvent{
+			Kind:   ConnectionEventStateChanged,
+			PeerID: remoteID,
+			State:  cs,
+		})
 		if cs == webrtc.PeerConnectionStateFailed ||
 			cs == webrtc.PeerConnectionStateDisconnected ||
 			cs == webrtc.PeerConnectionStateClosed {
@@ -319,6 +346,14 @@ func (n *WebRTCNegotiator) logf(format string, args ...any) {
 		return
 	}
 	n.logger.Printf("[webrtc] "+format, args...)
+}
+
+func (n *WebRTCNegotiator) emit(event ConnectionEvent) {
+	select {
+	case n.events <- event:
+	default:
+		n.logf("dropping connection event kind=%d peer=%s", event.Kind, event.PeerID)
+	}
 }
 
 func (p *webrtcPeerState) send(msg WebRTCSignalMessage) error {

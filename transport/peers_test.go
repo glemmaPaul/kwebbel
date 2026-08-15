@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/pion/webrtc/v4"
 )
@@ -18,12 +19,14 @@ type fakeNegotiator struct {
 	calls   int
 	started chan peer.ID
 	closed  chan peer.ID
+	events  chan ConnectionEvent
 }
 
 func newFakeNegotiator() *fakeNegotiator {
 	return &fakeNegotiator{
 		started: make(chan peer.ID, 10),
 		closed:  make(chan peer.ID, 10),
+		events:  make(chan ConnectionEvent, 10),
 	}
 }
 
@@ -47,6 +50,12 @@ func (n *fakeNegotiator) Disconnect(id peer.ID) error {
 	return nil
 }
 
+func (n *fakeNegotiator) HandleSignalStream(network.Stream) {}
+
+func (n *fakeNegotiator) Events() <-chan ConnectionEvent {
+	return n.events
+}
+
 func (n *fakeNegotiator) callCount() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -54,11 +63,10 @@ func (n *fakeNegotiator) callCount() int {
 }
 
 func TestPeerConnectionsSchedulesAndTracksDialFailure(t *testing.T) {
-	connections := NewPeerConnections(testRetryPolicy())
-	defer connections.Close()
 	negotiator := newFakeNegotiator()
 	negotiator.err = errors.New("dial failed")
-	connections.SetNegotiator(negotiator)
+	connections := NewPeerConnections(context.Background(), negotiator, testRetryPolicy())
+	defer connections.Close()
 
 	peerID := peer.ID("peer-a")
 	connections.Track(peer.AddrInfo{ID: peerID})
@@ -67,23 +75,32 @@ func TestPeerConnectionsSchedulesAndTracksDialFailure(t *testing.T) {
 		return !status.Dialing && status.RetryCount == 1 && status.LastError == "dial failed"
 	})
 
-	connections.UpdateState(peerID, webrtc.PeerConnectionStateConnected)
-	status, _ := connections.Status(peerID)
-	if !status.Connected || status.RetryCount != 0 || status.LastError != "" {
-		t.Fatalf("unexpected connected status: %+v", status)
+	negotiator.events <- ConnectionEvent{
+		Kind:   ConnectionEventStateChanged,
+		PeerID: peerID,
+		State:  webrtc.PeerConnectionStateConnected,
 	}
+	awaitStatus(t, connections, peerID, func(status PeerConnectionStatus) bool {
+		return status.Connected && status.RetryCount == 0 && status.LastError == ""
+	})
 }
 
 func TestPeerConnectionsDoesNotRedialConnectingPeer(t *testing.T) {
-	connections := NewPeerConnections(testRetryPolicy())
-	defer connections.Close()
 	negotiator := newFakeNegotiator()
-	connections.SetNegotiator(negotiator)
+	connections := NewPeerConnections(context.Background(), negotiator, testRetryPolicy())
+	defer connections.Close()
 
 	peerID := peer.ID("peer-a")
 	connections.Track(peer.AddrInfo{ID: peerID})
 	awaitDial(t, negotiator, peerID)
-	connections.UpdateState(peerID, webrtc.PeerConnectionStateConnecting)
+	negotiator.events <- ConnectionEvent{
+		Kind:   ConnectionEventStateChanged,
+		PeerID: peerID,
+		State:  webrtc.PeerConnectionStateConnecting,
+	}
+	awaitStatus(t, connections, peerID, func(status PeerConnectionStatus) bool {
+		return status.Connecting
+	})
 
 	time.Sleep(20 * time.Millisecond)
 	if got := negotiator.callCount(); got != 1 {
@@ -92,11 +109,10 @@ func TestPeerConnectionsDoesNotRedialConnectingPeer(t *testing.T) {
 }
 
 func TestPeerConnectionsDialPreventsDuplicatesAndTimesOut(t *testing.T) {
-	connections := NewPeerConnections(testRetryPolicy())
-	defer connections.Close()
 	negotiator := newFakeNegotiator()
 	negotiator.wait = true
-	connections.SetNegotiator(negotiator)
+	connections := NewPeerConnections(context.Background(), negotiator, testRetryPolicy())
+	defer connections.Close()
 
 	remote := peer.AddrInfo{ID: peer.ID("peer-a")}
 	result := make(chan error, 1)
@@ -117,10 +133,9 @@ func TestPeerConnectionsDialPreventsDuplicatesAndTimesOut(t *testing.T) {
 }
 
 func TestPeerConnectionsSyncPeers(t *testing.T) {
-	connections := NewPeerConnections(DefaultRetryPolicy())
-	defer connections.Close()
 	negotiator := newFakeNegotiator()
-	connections.SetNegotiator(negotiator)
+	connections := NewPeerConnections(context.Background(), negotiator, DefaultRetryPolicy())
+	defer connections.Close()
 
 	self := peer.ID("self")
 	kept := peer.ID("kept")
@@ -147,6 +162,27 @@ func TestPeerConnectionsSyncPeers(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("timed out waiting for removed peer disconnect")
 	}
+}
+
+func TestPeerConnectionsTracksDiscoveredPeerEvent(t *testing.T) {
+	negotiator := newFakeNegotiator()
+	connections := NewPeerConnections(context.Background(), negotiator, DefaultRetryPolicy())
+	defer connections.Close()
+
+	peerID := peer.ID("incoming")
+	negotiator.events <- ConnectionEvent{
+		Kind:   ConnectionEventPeerDiscovered,
+		PeerID: peerID,
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if connections.IsTracked(peerID) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("discovered peer was not tracked")
 }
 
 func testRetryPolicy() RetryPolicy {
