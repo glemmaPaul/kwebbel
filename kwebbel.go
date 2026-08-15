@@ -81,8 +81,8 @@ func main() {
 		relayInfo := peer.AddrInfo{
 			ID: relayId,
 			Addrs: []ma.Multiaddr{
-				ma.StringCast("/ip4/89.167.83.252/udp/4242/quic-v1"),
-				ma.StringCast("/ip4/89.167.83.252/tcp/4242"),
+				ma.StringCast("/ip4/127.0.0.1/udp/4242/quic-v1"),
+				ma.StringCast("/ip4/127.0.0.1/tcp/4242"),
 			},
 		}
 		relayManager := conn.NewRelayManager(host)
