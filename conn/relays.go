@@ -9,6 +9,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 type RelayInfo struct {
@@ -101,4 +102,15 @@ func (r *RelayManager) isConnected(relayID peer.ID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.relays[relayID].connected
+}
+
+// RelayAddrInfo is a helper function to create addrinfo of transports used
+func RelayAddrInfo(relayID peer.ID, relayIp string) peer.AddrInfo {
+	return peer.AddrInfo{
+		ID: relayID,
+		Addrs: []ma.Multiaddr{
+			ma.StringCast(fmt.Sprintf("/ip4/%s/udp/4242/quic-v1", relayIp)),
+			ma.StringCast(fmt.Sprintf("/ip4/%s/tcp/4242", relayIp)),
+		},
+	}
 }

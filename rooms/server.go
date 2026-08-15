@@ -18,6 +18,7 @@ type PeerStream struct {
 
 type MCServer struct {
 	mu         sync.RWMutex
+	writeMu    sync.Mutex
 	streams    map[peer.ID]network.Stream
 	activeRoom *Room
 }
@@ -43,11 +44,7 @@ func (mc *MCServer) Serve() error {
 
 func (mc *MCServer) AttachStream(s network.Stream) {
 	log.Println("Received room message stream from", s.Conn().RemotePeer())
-	// Check if the peer stream is allowed in peers
 	peerID := s.Conn().RemotePeer()
-	if mc.activeRoom != nil {
-		mc.activeRoom.AddPeer(peerID)
-	}
 	mc.mu.Lock()
 	if _, ok := mc.streams[peerID]; ok {
 		mc.mu.Unlock()
@@ -64,6 +61,7 @@ func (mc *MCServer) AttachStream(s network.Stream) {
 			mc.mu.Unlock()
 			if mc.activeRoom != nil {
 				mc.activeRoom.RemovePeer(peerID)
+				mc.BroadcastPeerList()
 			}
 		}()
 
@@ -75,7 +73,6 @@ func (mc *MCServer) AttachStream(s network.Stream) {
 
 func (mc *MCServer) HandleLobbyBus(context context.Context, s network.Stream) error {
 	decoder := json.NewDecoder(s)
-	encoder := json.NewEncoder(s)
 
 	for {
 		var msg LobbyMessage
@@ -87,7 +84,18 @@ func (mc *MCServer) HandleLobbyBus(context context.Context, s network.Stream) er
 		case "request-to-join":
 			log.Println("Request to join room", msg.Payload)
 			// TODO: Implement ticket validation
-			encoder.Encode(LobbyMessage{Type: "allowed-to-join", Payload: true})
+			remoteID := s.Conn().RemotePeer()
+			mc.activeRoom.AddPeer(remoteID)
+			if err := mc.writeMessage(s, LobbyMessage{
+				Type: "allowed-to-join",
+				Payload: JoinResponse{
+					Allowed: true,
+					Members: mc.peerInfos(),
+				},
+			}); err != nil {
+				return err
+			}
+			mc.broadcastPeerListExcept(remoteID)
 		}
 	}
 }
@@ -111,37 +119,51 @@ func (mc *MCServer) allowedPeerStreams() map[peer.ID]network.Stream {
 	return streams
 }
 
-func (mc *MCServer) _broadcast(msg LobbyMessage, streams map[peer.ID]network.Stream) {
+func (mc *MCServer) broadcast(msg LobbyMessage, streams map[peer.ID]network.Stream) {
 	for id, stream := range streams {
 		if stream == nil {
 			continue
 		}
-		enc := json.NewEncoder(stream)
-		if err := enc.Encode(msg); err != nil {
+		if err := mc.writeMessage(stream, msg); err != nil {
 			log.Printf("Failed to update peer %s: %v", id.String(), err)
 		}
 	}
 }
 
 func (mc *MCServer) BroadcastPeerList() {
+	mc.broadcastPeerListExcept("")
+}
+
+func (mc *MCServer) broadcastPeerListExcept(excluded peer.ID) {
 	if mc.activeRoom == nil {
 		return
-	}
-
-	allowedPeers := mc.activeRoom.GetPeers()
-	members := make([]PeerInfo, 0, len(allowedPeers))
-	for _, peerID := range allowedPeers {
-		members = append(members, PeerInfo{PeerID: peerID.String()})
 	}
 
 	update := LobbyMessage{
 		Type: "current-allowed-peers",
 		Payload: PeerUpdate{
-			Members: members,
+			Members: mc.peerInfos(),
 		},
 	}
 
-	mc._broadcast(update, mc.allowedPeerStreams())
+	streams := mc.allowedPeerStreams()
+	delete(streams, excluded)
+	mc.broadcast(update, streams)
+}
+
+func (mc *MCServer) peerInfos() []PeerInfo {
+	allowedPeers := mc.activeRoom.GetPeers()
+	members := make([]PeerInfo, 0, len(allowedPeers))
+	for _, peerID := range allowedPeers {
+		members = append(members, PeerInfo{PeerID: peerID.String()})
+	}
+	return members
+}
+
+func (mc *MCServer) writeMessage(stream network.Stream, msg LobbyMessage) error {
+	mc.writeMu.Lock()
+	defer mc.writeMu.Unlock()
+	return json.NewEncoder(stream).Encode(msg)
 }
 
 func (mc *MCServer) Heartbeat(ctx context.Context) error {

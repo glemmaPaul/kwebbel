@@ -15,11 +15,11 @@ import (
 	"github.com/kwebbelkorp/kwebbel/core"
 	"github.com/kwebbelkorp/kwebbel/identity"
 	"github.com/kwebbelkorp/kwebbel/rooms"
+	"github.com/kwebbelkorp/kwebbel/transport"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/multiformats/go-multiaddr"
-	ma "github.com/multiformats/go-multiaddr"
 )
 
 func main() {
@@ -28,8 +28,8 @@ func main() {
 
 	ch := make(chan os.Signal, 1)
 	connectTo := flag.String("connect-to", "", "address to connect to")
-	useRelay := flag.Bool("use-relay", true, "use relay")
 	relayPeerId := flag.String("relay-peer-id", "12D3KooWNCttbqRdEeF1vaSuZBKns61jmzzGRp5DZuU1wpYsWg72", "relay peer id")
+	relayIp := flag.String("relay-ip", "89.167.83.252", "relay ip")
 
 	flag.Parse()
 
@@ -50,103 +50,106 @@ func main() {
 	}
 	addrs, err := peer.AddrInfoToP2pAddrs(&peerInfo)
 	fmt.Println("libp2p node address:", addrs[0])
-
-	kwebbelaar := core.NewKwebbelaar(&host, im)
 	mixer := audio.NewMixer()
+	audioTransport := transport.NewOpusAudioTransport(mixer)
+	peerConnections := transport.NewPeerConnections(transport.DefaultRetryPolicy())
+	room := rooms.NewRoom("default")
+	wrb := transport.NewWebRTCAudioBridge(host, room, audioTransport, peerConnections)
+	relayManager := conn.NewRelayManager(host)
+
+	kwebbelaar := core.NewKwebbelaar(host, im, wrb)
+
 	outputErr := kwebbelaar.StartAudioOutput(mixer)
 	if outputErr != nil {
 		log.Fatal(outputErr)
 	}
 
-	webrtcBridge := conn.NewWebRTCAudioBridge(host, mixer)
-
 	if *connectTo == "" {
-		room := rooms.NewRoom("default")
-		room.AddPeer(peer.ID(host.ID()))
-		mcServer := rooms.NewMCServer(room)
-		mcServer.Serve()
-		host.SetStreamHandler(rooms.RoomProtocol, mcServer.AttachStream)
+		kwebbelaar.BecomeMC(room)
 	} else {
 		host.SetStreamHandler(rooms.RoomProtocol, func(s network.Stream) {
 			log.Println("Incoming room stream from:", s.Conn().RemotePeer())
 		})
 	}
 
-	if *useRelay {
-		relayId, err := peer.Decode(*relayPeerId)
-		if err != nil {
-			log.Fatal(err)
-		}
-		//serverStr := *relayAddr
-		relayInfo := peer.AddrInfo{
-			ID: relayId,
-			Addrs: []ma.Multiaddr{
-				ma.StringCast("/ip4/89.167.83.252/udp/4242/quic-v1"),
-				ma.StringCast("/ip4/89.167.83.252/tcp/4242"),
-			},
-		}
-		relayManager := conn.NewRelayManager(host)
-		err = relayManager.Connect(ctx, relayInfo)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		available := relayManager.Available()
-		for _, relay := range available {
-			relayaddr, _ := multiaddr.NewMultiaddr("/p2p/" + relay.ID.String() + "/p2p-circuit/p2p/" + host.ID().String())
-			log.Println("Relay address:", relayaddr.String())
-		}
-	}
-
-	audioEgress, err := kwebbelaar.StartAudioEgress()
+	relayId, err := peer.Decode(*relayPeerId)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	webrtcBridge.StartPublishing(context.Background(), audioEgress.Output)
+	relayInfo := conn.RelayAddrInfo(relayId, *relayIp)
+
+	err = relayManager.Connect(ctx, relayInfo)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	available := relayManager.Available()
+	for _, relay := range available {
+		relayaddr, _ := multiaddr.NewMultiaddr("/p2p/" + relay.ID.String() + "/p2p-circuit/p2p/" + host.ID().String())
+		log.Println("Relay address:", relayaddr.String())
+	}
+
+	mic, err := audio.NewAudioInput()
+	if err != nil {
+		log.Fatal(err)
+	}
+	audioEgress, err := kwebbelaar.StartAudioInput(mic)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	wrb.StartPublishing(context.Background(), audioEgress.Output)
 
 	if *connectTo != "" {
-		// 1. Parse the string as a Multiaddress
 		maddr, err := multiaddr.NewMultiaddr(*connectTo)
 		if err != nil {
 			log.Printf("Invalid address: %v", err)
 			log.Fatal(err)
 		}
 		log.Println("Connecting to", *connectTo)
-		info, err := peer.AddrInfoFromP2pAddr(maddr)
+		connectToAddr, err := peer.AddrInfoFromP2pAddr(maddr)
 		if err != nil {
 			log.Printf("AddrInfo error: %v", err)
 			log.Fatal(err)
 		}
 
 		// Relay connections are "limited" - must opt-in to use them for streams
-		host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
-		// Bootstrap allowlist so initial negotiation to room host is possible.
-		webrtcBridge.AllowPeer(info.ID)
-		webrtcBridge.TrackPeer(*info)
-		log.Printf("Tracking peer for WebRTC retries: %s", info.ID)
+		host.Peerstore().AddAddrs(connectToAddr.ID, connectToAddr.Addrs, peerstore.PermanentAddrTTL)
 
-		log.Printf("Opening room stream to: %s", info.ID)
-		roomStream, err := host.NewStream(network.WithAllowLimitedConn(context.Background(), string(rooms.RoomProtocol)), info.ID, rooms.RoomProtocol)
+		log.Printf("Opening room stream to: %s", connectToAddr.ID)
+		roomStream, err := host.NewStream(network.WithAllowLimitedConn(context.Background(), string(rooms.RoomProtocol)), connectToAddr.ID, rooms.RoomProtocol)
 		if err != nil {
-			log.Println("Error creating message stream to", info.ID, err)
+			log.Println("Error creating message stream to", connectToAddr.ID, err)
 			log.Fatal(err)
 		}
 
 		signals := &rooms.RoomListenerSignals{
 			OnUpdatedAllowedPeers: func(peers []peer.ID) {
 				log.Println("Allowed peers updated:", peers)
-				webrtcBridge.SetAllowedPeers(peers)
-				webrtcBridge.TrackAllowedPeers()
+				wrb.SyncRoomPeers()
 			},
 		}
-		listener := rooms.NewRoomListener(roomStream, signals)
+		listener := rooms.NewRoomListener(roomStream, room, signals)
+
+		joinCtx, joinCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = listener.Join(joinCtx, rooms.JoinRequest{
+			PeerID: host.ID().String(),
+		})
+		joinCancel()
+		if err != nil {
+			log.Fatalf("Failed to join room hosted by %s: %v", connectToAddr.ID, err)
+		}
 		listener.Start()
+
+		if err := wrb.Dial(context.Background(), *connectToAddr); err != nil {
+			log.Printf("Initial WebRTC dial failed; retries remain active for %s: %v", connectToAddr.ID, err)
+		}
 	}
 
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	<-ch
 	fmt.Println("Shutting down...")
-	webrtcBridge.Close()
+	wrb.Close()
 	host.Close()
 }

@@ -5,6 +5,11 @@ type JoinRequest struct {
 	Ticket string `json:"ticket"`
 }
 
+type JoinResponse struct {
+	Allowed bool       `json:"allowed"`
+	Members []PeerInfo `json:"members"`
+}
+
 type PeerInfo struct {
 	PeerID         string `json:"peer_id"`
 	ConnectionAddr string `json:"connection_addr"`

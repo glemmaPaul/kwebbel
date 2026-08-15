@@ -1,19 +1,26 @@
 package rooms
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
-	"sync"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
+// Roomlistener handles the lobby bus message for a room.
+// It is used to join a room and receive updates on the allowed peers.
+// Which reflects back in room.GetPeers()
 type RoomListener struct {
-	stream       network.Stream
-	signals      *RoomListenerSignals
-	mu           sync.RWMutex
-	allowedPeers map[peer.ID]struct{}
+	stream  network.Stream
+	room    *Room
+	signals *RoomListenerSignals
+	decoder *json.Decoder
+	encoder *json.Encoder
 }
 
 type RoomListenerSignals struct {
@@ -25,33 +32,77 @@ type listenerMessage struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-func NewRoomListener(stream network.Stream, signals *RoomListenerSignals) *RoomListener {
+func NewRoomListener(stream network.Stream, room *Room, signals *RoomListenerSignals) *RoomListener {
+	if room == nil {
+		panic("rooms: RoomListener requires a room")
+	}
 	if signals == nil {
 		signals = &RoomListenerSignals{}
 	}
 	return &RoomListener{
-		stream:       stream,
-		signals:      signals,
-		allowedPeers: make(map[peer.ID]struct{}),
+		stream:  stream,
+		room:    room,
+		signals: signals,
+		decoder: json.NewDecoder(stream),
+		encoder: json.NewEncoder(stream),
+	}
+}
+
+// Join requests room admission and waits until the host has committed the
+// membership update. Start must only be called after Join succeeds.
+func (rl *RoomListener) Join(ctx context.Context, request JoinRequest) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := rl.stream.SetDeadline(deadline); err != nil {
+			return fmt.Errorf("set room join deadline: %w", err)
+		}
+		defer func() {
+			_ = rl.stream.SetDeadline(time.Time{})
+		}()
+	}
+
+	if err := rl.encoder.Encode(LobbyMessage{
+		Type:    "request-to-join",
+		Payload: request,
+	}); err != nil {
+		return fmt.Errorf("send room join request: %w", err)
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		var msg listenerMessage
+		if err := rl.decoder.Decode(&msg); err != nil {
+			return fmt.Errorf("receive room join response: %w", err)
+		}
+
+		switch msg.Type {
+		case "allowed-to-join":
+			return rl.onJoinAllowed(msg)
+		case "current-allowed-peers":
+			if err := rl.onUpdateAllowedPeers(msg); err != nil {
+				return err
+			}
+		default:
+			continue
+		}
 	}
 }
 
 func (rl *RoomListener) Start() {
-	decoder := json.NewDecoder(rl.stream)
-	go rl.listen(decoder)
+	go rl.listen()
 }
 
 func (rl *RoomListener) Stop() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	rl.allowedPeers = make(map[peer.ID]struct{})
+	rl.room.setPeers(nil)
 }
 
-func (rl *RoomListener) listen(decoder *json.Decoder) {
+func (rl *RoomListener) listen() {
 	defer rl.stream.Close()
 	for {
 		var msg listenerMessage
-		if err := decoder.Decode(&msg); err != nil {
+		if err := rl.decoder.Decode(&msg); err != nil {
 			log.Printf("room listener stream ended: %v", err)
 			return
 		}
@@ -68,22 +119,34 @@ func (rl *RoomListener) listen(decoder *json.Decoder) {
 	}
 }
 
+func (rl *RoomListener) onJoinAllowed(msg listenerMessage) error {
+	var response JoinResponse
+	if err := json.Unmarshal(msg.Payload, &response); err != nil {
+		return fmt.Errorf("parse room join response: %w", err)
+	}
+	if !response.Allowed {
+		return errors.New("room join request was rejected")
+	}
+
+	peers, err := decodePeers(response.Members)
+	if err != nil {
+		return err
+	}
+	rl.room.setPeers(peers)
+	return nil
+}
+
 func (rl *RoomListener) onUpdateAllowedPeers(msg listenerMessage) error {
 	var update PeerUpdate
 	if err := json.Unmarshal(msg.Payload, &update); err != nil {
-		log.Printf("room listener payload parse failed: %v", err)
-		return err
+		return fmt.Errorf("parse room peer update: %w", err)
 	}
 
-	peers := make([]peer.ID, 0, len(update.Members))
-	for _, member := range update.Members {
-		id, err := peer.Decode(member.PeerID)
-		if err != nil {
-			continue
-		}
-		peers = append(peers, id)
+	peers, err := decodePeers(update.Members)
+	if err != nil {
+		return err
 	}
-	rl.setAllowedPeers(peers)
+	rl.room.setPeers(peers)
 
 	if rl.signals != nil && rl.signals.OnUpdatedAllowedPeers != nil {
 		rl.signals.OnUpdatedAllowedPeers(peers)
@@ -91,31 +154,22 @@ func (rl *RoomListener) onUpdateAllowedPeers(msg listenerMessage) error {
 	return nil
 }
 
-func (rl *RoomListener) AllowedPeers() []peer.ID {
-	rl.mu.RLock()
-	defer rl.mu.RUnlock()
-
-	peers := make([]peer.ID, 0, len(rl.allowedPeers))
-	for id := range rl.allowedPeers {
+func decodePeers(members []PeerInfo) ([]peer.ID, error) {
+	peers := make([]peer.ID, 0, len(members))
+	for _, member := range members {
+		id, err := peer.Decode(member.PeerID)
+		if err != nil {
+			return nil, fmt.Errorf("decode room peer %q: %w", member.PeerID, err)
+		}
 		peers = append(peers, id)
 	}
-	return peers
+	return peers, nil
+}
+
+func (rl *RoomListener) AllowedPeers() []peer.ID {
+	return rl.room.GetPeers()
 }
 
 func (rl *RoomListener) IsAllowed(peerID peer.ID) bool {
-	rl.mu.RLock()
-	defer rl.mu.RUnlock()
-	_, ok := rl.allowedPeers[peerID]
-	return ok
-}
-
-func (rl *RoomListener) setAllowedPeers(peers []peer.ID) {
-	next := make(map[peer.ID]struct{}, len(peers))
-	for _, id := range peers {
-		next[id] = struct{}{}
-	}
-
-	rl.mu.Lock()
-	rl.allowedPeers = next
-	rl.mu.Unlock()
+	return rl.room.IsAllowed(peerID)
 }
