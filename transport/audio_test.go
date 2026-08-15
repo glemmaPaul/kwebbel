@@ -62,5 +62,3 @@ func (t *fakeOpusTrack) WriteSample(sample media.Sample) error {
 	t.samples = append(t.samples, sample)
 	return t.err
 }
-
-var _ OpusTrack = (*fakeOpusTrack)(nil)

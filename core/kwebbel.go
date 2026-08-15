@@ -11,11 +11,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
-type Group struct {
-	id    string
-	peers []string
-}
-
 type MCAttributes struct {
 	room     *rooms.Room
 	mcServer *rooms.MCServer
@@ -26,8 +21,8 @@ type Kwebbelaar struct {
 	identity     *identity.IdentityManager
 	audioEgress  *audio.AudioEgress
 	webrtcBridge *transport.WebRTCAudioBridge
-	group        *Group
-	mcAttributes *MCAttributes
+	room         *rooms.Room
+	mcServer     *rooms.MCServer
 }
 
 func NewKwebbelaar(host host.Host, identity *identity.IdentityManager, webrtcBridge *transport.WebRTCAudioBridge) *Kwebbelaar {
@@ -38,15 +33,18 @@ func NewKwebbelaar(host host.Host, identity *identity.IdentityManager, webrtcBri
 	}
 }
 
-func (k *Kwebbelaar) BecomeMC(room *rooms.Room) {
+func (k *Kwebbelaar) BecomeMC(room *rooms.Room) error {
+	if k.room != nil {
+		return fmt.Errorf("you are already attending a room")
+	}
 	room.AddPeer(peer.ID(k.host.ID()))
 	mcServer := rooms.NewMCServer(room)
 	mcServer.Serve()
 	k.host.SetStreamHandler(rooms.RoomProtocol, mcServer.AttachStream)
-	k.mcAttributes = &MCAttributes{
-		room:     room,
-		mcServer: mcServer,
-	}
+	k.room = room
+	k.mcServer = mcServer
+
+	return nil
 }
 
 func (k *Kwebbelaar) StartAudioOutput(mixer *audio.Mixer) error {
@@ -69,10 +67,6 @@ func (k *Kwebbelaar) StartAudioInput(mic *audio.AudioInput) (*audio.AudioEgress,
 
 	egress := audio.NewAudioEgress(mic.OutputChan)
 	egress.Start()
-	err = mic.Start()
-	if err != nil {
-		return nil, fmt.Errorf("failed to start audio input: %w", err)
-	}
 	k.audioEgress = egress
 	return egress, nil
 }

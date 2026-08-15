@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"time"
 
 	"github.com/kwebbelkorp/kwebbel/rooms"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -110,19 +109,9 @@ func (n *WebRTCNegotiator) Dial(ctx context.Context, remote peer.AddrInfo) error
 	return nil
 }
 
-func (n *WebRTCNegotiator) awaitAllowance(remoteID peer.ID, maxRetries int) error {
-	for i := 0; i < maxRetries; i++ {
-		if n.isPeerAllowed(remoteID) {
-			return nil
-		}
-		time.Sleep(1 * time.Second)
-	}
-	return fmt.Errorf("peer %s is not allowed to join room %s", remoteID, n.room.ID)
-}
-
 func (n *WebRTCNegotiator) handleIncomingSignalStream(stream network.Stream) {
 	remoteID := stream.Conn().RemotePeer()
-	if err := n.awaitAllowance(remoteID, 10); err != nil {
+	if !n.isPeerAllowed(remoteID) {
 		n.logf("rejected signaling stream from non-allowed peer=%s", remoteID)
 		_ = stream.Reset()
 		return

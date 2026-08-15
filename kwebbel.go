@@ -116,11 +116,6 @@ func main() {
 
 		// Relay connections are "limited" - must opt-in to use them for streams
 		host.Peerstore().AddAddrs(connectToAddr.ID, connectToAddr.Addrs, peerstore.PermanentAddrTTL)
-		// Add the room host before its first membership update arrives.
-		room.AddPeer(connectToAddr.ID)
-		if err := wrb.Dial(context.Background(), *connectToAddr); err != nil {
-			log.Printf("Initial WebRTC dial failed; retries remain active for %s: %v", connectToAddr.ID, err)
-		}
 
 		log.Printf("Opening room stream to: %s", connectToAddr.ID)
 		roomStream, err := host.NewStream(network.WithAllowLimitedConn(context.Background(), string(rooms.RoomProtocol)), connectToAddr.ID, rooms.RoomProtocol)
@@ -132,10 +127,24 @@ func main() {
 		signals := &rooms.RoomListenerSignals{
 			OnUpdatedAllowedPeers: func(peers []peer.ID) {
 				log.Println("Allowed peers updated:", peers)
+				wrb.SyncRoomPeers()
 			},
 		}
 		listener := rooms.NewRoomListener(roomStream, room, signals)
+
+		joinCtx, joinCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = listener.Join(joinCtx, rooms.JoinRequest{
+			PeerID: host.ID().String(),
+		})
+		joinCancel()
+		if err != nil {
+			log.Fatalf("Failed to join room hosted by %s: %v", connectToAddr.ID, err)
+		}
 		listener.Start()
+
+		if err := wrb.Dial(context.Background(), *connectToAddr); err != nil {
+			log.Printf("Initial WebRTC dial failed; retries remain active for %s: %v", connectToAddr.ID, err)
+		}
 	}
 
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
