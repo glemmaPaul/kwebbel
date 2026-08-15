@@ -54,7 +54,7 @@ func main() {
 	audioTransport := transport.NewOpusAudioTransport(mixer)
 	peerConnections := transport.NewPeerConnections(transport.DefaultRetryPolicy())
 	room := rooms.NewRoom("default")
-	wrb := conn.NewWebRTCAudioBridge(host, room, audioTransport, peerConnections)
+	wrb := transport.NewWebRTCAudioBridge(host, room, audioTransport, peerConnections)
 	relayManager := conn.NewRelayManager(host)
 
 	kwebbelaar := core.NewKwebbelaar(host, im, wrb)
@@ -132,7 +132,6 @@ func main() {
 		signals := &rooms.RoomListenerSignals{
 			OnUpdatedAllowedPeers: func(peers []peer.ID) {
 				log.Println("Allowed peers updated:", peers)
-				wrb.TrackRoomPeers()
 			},
 		}
 		listener := rooms.NewRoomListener(roomStream, room, signals)

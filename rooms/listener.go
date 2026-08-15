@@ -43,7 +43,7 @@ func (rl *RoomListener) Start() {
 }
 
 func (rl *RoomListener) Stop() {
-	rl.room.SetPeers(nil)
+	rl.room.setPeers(nil)
 }
 
 func (rl *RoomListener) listen(decoder *json.Decoder) {
@@ -82,7 +82,7 @@ func (rl *RoomListener) onUpdateAllowedPeers(msg listenerMessage) error {
 		}
 		peers = append(peers, id)
 	}
-	rl.room.SetPeers(peers)
+	rl.room.setPeers(peers)
 
 	if rl.signals != nil && rl.signals.OnUpdatedAllowedPeers != nil {
 		rl.signals.OnUpdatedAllowedPeers(peers)

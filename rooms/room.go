@@ -36,7 +36,7 @@ func (r *Room) AddPeer(peerID peer.ID) {
 	r.Peers = append(r.Peers, peerID)
 }
 
-func (r *Room) SetPeers(peers []peer.ID) {
+func (r *Room) setPeers(peers []peer.ID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

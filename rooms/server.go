@@ -87,6 +87,7 @@ func (mc *MCServer) HandleLobbyBus(context context.Context, s network.Stream) er
 		case "request-to-join":
 			log.Println("Request to join room", msg.Payload)
 			// TODO: Implement ticket validation
+			mc.activeRoom.AddPeer(s.Conn().RemotePeer())
 			encoder.Encode(LobbyMessage{Type: "allowed-to-join", Payload: true})
 		}
 	}

@@ -4,9 +4,9 @@ import (
 	"fmt"
 
 	"github.com/kwebbelkorp/kwebbel/audio"
-	"github.com/kwebbelkorp/kwebbel/conn"
 	"github.com/kwebbelkorp/kwebbel/identity"
 	"github.com/kwebbelkorp/kwebbel/rooms"
+	"github.com/kwebbelkorp/kwebbel/transport"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -25,12 +25,12 @@ type Kwebbelaar struct {
 	host         host.Host
 	identity     *identity.IdentityManager
 	audioEgress  *audio.AudioEgress
-	webrtcBridge *conn.WebRTCAudioBridge
+	webrtcBridge *transport.WebRTCAudioBridge
 	group        *Group
 	mcAttributes *MCAttributes
 }
 
-func NewKwebbelaar(host host.Host, identity *identity.IdentityManager, webrtcBridge *conn.WebRTCAudioBridge) *Kwebbelaar {
+func NewKwebbelaar(host host.Host, identity *identity.IdentityManager, webrtcBridge *transport.WebRTCAudioBridge) *Kwebbelaar {
 	return &Kwebbelaar{
 		host:         host,
 		identity:     identity,
