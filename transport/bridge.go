@@ -19,7 +19,6 @@ const (
 type WebRTCAudioBridge struct {
 	host        host.Host
 	room        *rooms.Room
-	audio       *OpusAudioTransport
 	connections PeerConnectionManager
 	logger      *log.Logger
 	closed      chan struct{}
@@ -29,13 +28,11 @@ func NewWebRTCAudioBridge(
 	ctx context.Context,
 	h host.Host,
 	room *rooms.Room,
-	audioTransport *OpusAudioTransport,
 	connections PeerConnectionManager) *WebRTCAudioBridge {
 	logger := logging.FromContext(ctx)
 	bridge := &WebRTCAudioBridge{
 		host:        h,
 		room:        room,
-		audio:       audioTransport,
 		connections: connections,
 		logger:      logger,
 		closed:      make(chan struct{}),
@@ -57,30 +54,6 @@ func (b *WebRTCAudioBridge) SyncRoomPeers() {
 		b.logger.Printf("failed syncing room peers: %v", err)
 	}
 	b.logger.Printf("synced room peers room=%s peer_count=%d", b.room.ID, b.room.GetPeerCount())
-}
-
-// StartPublishing forwards 20ms Opus packets to all active WebRTC peers.
-func (b *WebRTCAudioBridge) StartPublishing(ctx context.Context, opusPackets <-chan []byte) {
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-b.closed:
-				return
-			case packet, ok := <-opusPackets:
-				if !ok {
-					return
-				}
-				if b.audio == nil {
-					continue
-				}
-				if err := b.audio.Publish(packet); err != nil {
-					b.logf("failed publishing Opus packet: %v", err)
-				}
-			}
-		}
-	}()
 }
 
 func (b *WebRTCAudioBridge) Close() {

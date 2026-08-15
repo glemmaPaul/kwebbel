@@ -28,11 +28,11 @@ func TestOpusAudioTransportPublishesToRegisteredTracks(t *testing.T) {
 	transport.AddTrack("second", second)
 
 	packet := []byte{1, 2, 3}
-	if err := transport.Publish(packet); err != nil {
+	if err := transport.publishPacket(packet); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	transport.RemoveTrack("second")
-	if err := transport.Publish(packet); err != nil {
+	if err := transport.publishPacket(packet); err != nil {
 		t.Fatalf("publish after removal: %v", err)
 	}
 
@@ -48,7 +48,7 @@ func TestOpusAudioTransportReturnsTrackErrors(t *testing.T) {
 	transport := NewOpusAudioTransport(nil)
 	transport.AddTrack("failed", &fakeOpusTrack{err: errors.New("write failed")})
 
-	if err := transport.Publish([]byte{1}); err == nil {
+	if err := transport.publishPacket([]byte{1}); err == nil {
 		t.Fatal("publish returned nil error")
 	}
 }

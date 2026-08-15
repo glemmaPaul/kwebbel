@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -67,7 +68,7 @@ func main() {
 
 	negotiator := transport.NewWebRTCNegotiator(ctx, host, room, audioTransport)
 	peerConnections := transport.NewPeerConnections(ctx, negotiator, transport.DefaultRetryPolicy())
-	wrb := transport.NewWebRTCAudioBridge(ctx, host, room, audioTransport, peerConnections)
+	wrb := transport.NewWebRTCAudioBridge(ctx, host, room, peerConnections)
 	relayManager := conn.NewRelayManager(host)
 
 	kwebbelaar := core.NewKwebbelaar(host, im, wrb)
@@ -114,7 +115,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	wrb.StartPublishing(ctx, audioEgress.Output)
+	var publishers sync.WaitGroup
+	publishers.Go(func() {
+		audioTransport.Publish(ctx, audioEgress.Output)
+	})
 
 	if *connectTo != "" {
 		maddr, err := multiaddr.NewMultiaddr(*connectTo)
@@ -210,6 +214,8 @@ func main() {
 		<-ch
 	}
 	logger.Println("Shutting down...")
+	cancel()
+	publishers.Wait()
 	wrb.Close()
 	host.Close()
 }

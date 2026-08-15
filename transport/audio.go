@@ -1,9 +1,11 @@
 package transport
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -62,7 +64,23 @@ func (t *OpusAudioTransport) RemoveTrack(peerID string) {
 	t.mu.Unlock()
 }
 
-func (t *OpusAudioTransport) Publish(opusPacket []byte) error {
+func (t *OpusAudioTransport) Publish(ctx context.Context, opusPackets <-chan []byte) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case packet, ok := <-opusPackets:
+			if !ok {
+				return
+			}
+			if err := t.publishPacket(packet); err != nil {
+				log.Printf("failed publishing Opus packet: %v", err)
+			}
+		}
+	}
+}
+
+func (t *OpusAudioTransport) publishPacket(opusPacket []byte) error {
 	t.mu.RLock()
 	tracks := make(map[string]*opusTrackState, len(t.tracks))
 	for id, state := range t.tracks {
