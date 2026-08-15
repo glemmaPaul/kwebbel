@@ -3,17 +3,15 @@ package rooms
 import (
 	"encoding/json"
 	"log"
-	"sync"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 type RoomListener struct {
-	stream       network.Stream
-	signals      *RoomListenerSignals
-	mu           sync.RWMutex
-	allowedPeers map[peer.ID]struct{}
+	stream  network.Stream
+	room    *Room
+	signals *RoomListenerSignals
 }
 
 type RoomListenerSignals struct {
@@ -25,14 +23,17 @@ type listenerMessage struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-func NewRoomListener(stream network.Stream, signals *RoomListenerSignals) *RoomListener {
+func NewRoomListener(stream network.Stream, room *Room, signals *RoomListenerSignals) *RoomListener {
+	if room == nil {
+		panic("rooms: RoomListener requires a room")
+	}
 	if signals == nil {
 		signals = &RoomListenerSignals{}
 	}
 	return &RoomListener{
-		stream:       stream,
-		signals:      signals,
-		allowedPeers: make(map[peer.ID]struct{}),
+		stream:  stream,
+		room:    room,
+		signals: signals,
 	}
 }
 
@@ -42,9 +43,7 @@ func (rl *RoomListener) Start() {
 }
 
 func (rl *RoomListener) Stop() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	rl.allowedPeers = make(map[peer.ID]struct{})
+	rl.room.SetPeers(nil)
 }
 
 func (rl *RoomListener) listen(decoder *json.Decoder) {
@@ -83,7 +82,7 @@ func (rl *RoomListener) onUpdateAllowedPeers(msg listenerMessage) error {
 		}
 		peers = append(peers, id)
 	}
-	rl.setAllowedPeers(peers)
+	rl.room.SetPeers(peers)
 
 	if rl.signals != nil && rl.signals.OnUpdatedAllowedPeers != nil {
 		rl.signals.OnUpdatedAllowedPeers(peers)
@@ -92,30 +91,9 @@ func (rl *RoomListener) onUpdateAllowedPeers(msg listenerMessage) error {
 }
 
 func (rl *RoomListener) AllowedPeers() []peer.ID {
-	rl.mu.RLock()
-	defer rl.mu.RUnlock()
-
-	peers := make([]peer.ID, 0, len(rl.allowedPeers))
-	for id := range rl.allowedPeers {
-		peers = append(peers, id)
-	}
-	return peers
+	return rl.room.GetPeers()
 }
 
 func (rl *RoomListener) IsAllowed(peerID peer.ID) bool {
-	rl.mu.RLock()
-	defer rl.mu.RUnlock()
-	_, ok := rl.allowedPeers[peerID]
-	return ok
-}
-
-func (rl *RoomListener) setAllowedPeers(peers []peer.ID) {
-	next := make(map[peer.ID]struct{}, len(peers))
-	for _, id := range peers {
-		next[id] = struct{}{}
-	}
-
-	rl.mu.Lock()
-	rl.allowedPeers = next
-	rl.mu.Unlock()
+	return rl.room.IsAllowed(peerID)
 }

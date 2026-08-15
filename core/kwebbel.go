@@ -38,8 +38,7 @@ func NewKwebbelaar(host host.Host, identity *identity.IdentityManager, webrtcBri
 	}
 }
 
-func (k *Kwebbelaar) BecomeMC() {
-	room := rooms.NewRoom("default")
+func (k *Kwebbelaar) BecomeMC(room *rooms.Room) {
 	room.AddPeer(peer.ID(k.host.ID()))
 	mcServer := rooms.NewMCServer(room)
 	mcServer.Serve()

@@ -30,7 +30,22 @@ func NewRoom(name string) *Room {
 func (r *Room) AddPeer(peerID peer.ID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if slices.Contains(r.Peers, peerID) {
+		return
+	}
 	r.Peers = append(r.Peers, peerID)
+}
+
+func (r *Room) SetPeers(peers []peer.ID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.Peers = make([]peer.ID, 0, len(peers))
+	for _, peerID := range peers {
+		if !slices.Contains(r.Peers, peerID) {
+			r.Peers = append(r.Peers, peerID)
+		}
+	}
 }
 
 func (r *Room) RemovePeer(peerID peer.ID) {
@@ -44,7 +59,7 @@ func (r *Room) RemovePeer(peerID peer.ID) {
 func (r *Room) GetPeers() []peer.ID {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.Peers
+	return slices.Clone(r.Peers)
 }
 
 func (r *Room) GetPeerCount() int {

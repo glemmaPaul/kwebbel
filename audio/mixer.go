@@ -22,9 +22,9 @@ func NewMixer() *Mixer {
 	}
 }
 
-// PushAudio adds new audio from a specific peer to their buffer
+// Push adds new audio from a specific peer to their buffer.
 // Call this from your Network Reader loop after decoding Opus -> Int16
-func (m *Mixer) PushAudio(peerID string, pcmData []int16) {
+func (m *Mixer) Push(peerID string, pcmData []int16) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

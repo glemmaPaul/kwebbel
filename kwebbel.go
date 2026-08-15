@@ -15,6 +15,7 @@ import (
 	"github.com/kwebbelkorp/kwebbel/core"
 	"github.com/kwebbelkorp/kwebbel/identity"
 	"github.com/kwebbelkorp/kwebbel/rooms"
+	"github.com/kwebbelkorp/kwebbel/transport"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
@@ -50,7 +51,10 @@ func main() {
 	addrs, err := peer.AddrInfoToP2pAddrs(&peerInfo)
 	fmt.Println("libp2p node address:", addrs[0])
 	mixer := audio.NewMixer()
-	wrb := conn.NewWebRTCAudioBridge(host, mixer)
+	audioTransport := transport.NewOpusAudioTransport(mixer)
+	peerConnections := transport.NewPeerConnections(transport.DefaultRetryPolicy())
+	room := rooms.NewRoom("default")
+	wrb := conn.NewWebRTCAudioBridge(host, room, audioTransport, peerConnections)
 	relayManager := conn.NewRelayManager(host)
 
 	kwebbelaar := core.NewKwebbelaar(host, im, wrb)
@@ -61,7 +65,7 @@ func main() {
 	}
 
 	if *connectTo == "" {
-		kwebbelaar.BecomeMC()
+		kwebbelaar.BecomeMC(room)
 	} else {
 		host.SetStreamHandler(rooms.RoomProtocol, func(s network.Stream) {
 			log.Println("Incoming room stream from:", s.Conn().RemotePeer())
@@ -104,34 +108,34 @@ func main() {
 			log.Fatal(err)
 		}
 		log.Println("Connecting to", *connectTo)
-		info, err := peer.AddrInfoFromP2pAddr(maddr)
+		connectToAddr, err := peer.AddrInfoFromP2pAddr(maddr)
 		if err != nil {
 			log.Printf("AddrInfo error: %v", err)
 			log.Fatal(err)
 		}
 
 		// Relay connections are "limited" - must opt-in to use them for streams
-		host.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
-		// Bootstrap allowlist so initial negotiation to room host is possible.
-		wrb.AllowPeer(info.ID)
-		wrb.TrackPeer(*info)
-		log.Printf("Tracking peer for WebRTC retries: %s", info.ID)
+		host.Peerstore().AddAddrs(connectToAddr.ID, connectToAddr.Addrs, peerstore.PermanentAddrTTL)
+		// Add the room host before its first membership update arrives.
+		room.AddPeer(connectToAddr.ID)
+		if err := wrb.Dial(context.Background(), *connectToAddr); err != nil {
+			log.Printf("Initial WebRTC dial failed; retries remain active for %s: %v", connectToAddr.ID, err)
+		}
 
-		log.Printf("Opening room stream to: %s", info.ID)
-		roomStream, err := host.NewStream(network.WithAllowLimitedConn(context.Background(), string(rooms.RoomProtocol)), info.ID, rooms.RoomProtocol)
+		log.Printf("Opening room stream to: %s", connectToAddr.ID)
+		roomStream, err := host.NewStream(network.WithAllowLimitedConn(context.Background(), string(rooms.RoomProtocol)), connectToAddr.ID, rooms.RoomProtocol)
 		if err != nil {
-			log.Println("Error creating message stream to", info.ID, err)
+			log.Println("Error creating message stream to", connectToAddr.ID, err)
 			log.Fatal(err)
 		}
 
 		signals := &rooms.RoomListenerSignals{
 			OnUpdatedAllowedPeers: func(peers []peer.ID) {
 				log.Println("Allowed peers updated:", peers)
-				wrb.SetAllowedPeers(peers)
-				wrb.TrackAllowedPeers()
+				wrb.TrackRoomPeers()
 			},
 		}
-		listener := rooms.NewRoomListener(roomStream, signals)
+		listener := rooms.NewRoomListener(roomStream, room, signals)
 		listener.Start()
 	}
 
