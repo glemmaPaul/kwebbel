@@ -16,6 +16,16 @@ type PeerStream struct {
 	peerID peer.ID
 }
 
+// type Signature struct {
+// 	PublicKey string `json:"public_key"`
+// 	Signature string `json:"signature"`
+// }
+
+// type Profile struct {
+// 	Name      string    `json:"name"`
+// 	Signature Signature `json:"signature"`
+// }
+
 type MCServer struct {
 	mu         sync.RWMutex
 	writeMu    sync.Mutex
@@ -35,10 +45,10 @@ func NewMCServer(room *Room) *MCServer {
 	}
 }
 
-func (mc *MCServer) Serve() error {
+func (mc *MCServer) Serve(ctx context.Context) error {
 	// Not yet a lot here..
 	log.Println("Serving MC server for room", mc.activeRoom.Name)
-	go mc.Heartbeat(context.Background())
+	go mc.Heartbeat(ctx)
 	return nil
 }
 
