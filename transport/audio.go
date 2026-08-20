@@ -10,7 +10,8 @@ import (
 	"sync"
 	"time"
 
-	pion "github.com/pion/webrtc/v4"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 	"gopkg.in/hraban/opus.v2"
 )
@@ -24,7 +25,7 @@ const (
 
 // Pusher receives decoded PCM samples grouped by their source.
 type Pusher interface {
-	Push(sourceID string, samples []int16)
+	Push(peerID peer.ID, samples []int16)
 }
 
 type OpusTrack interface {
@@ -36,7 +37,7 @@ type OpusTrack interface {
 type OpusAudioTransport struct {
 	output Pusher
 	mu     sync.RWMutex
-	tracks map[string]*opusTrackState
+	tracks map[peer.ID]*opusTrackState
 }
 
 type opusTrackState struct {
@@ -48,17 +49,22 @@ type opusTrackState struct {
 func NewOpusAudioTransport(output Pusher) *OpusAudioTransport {
 	return &OpusAudioTransport{
 		output: output,
-		tracks: make(map[string]*opusTrackState),
+		tracks: make(map[peer.ID]*opusTrackState),
 	}
 }
 
-func (t *OpusAudioTransport) AddTrack(peerID string, track OpusTrack) {
+func (t *OpusAudioTransport) AcceptTrack(peerID peer.ID, track *webrtc.TrackRemote) error {
+	go t.ReadTrack(peerID, track)
+	return nil
+}
+
+func (t *OpusAudioTransport) AddTrack(peerID peer.ID, track OpusTrack) {
 	t.mu.Lock()
 	t.tracks[peerID] = &opusTrackState{track: track}
 	t.mu.Unlock()
 }
 
-func (t *OpusAudioTransport) RemoveTrack(peerID string) {
+func (t *OpusAudioTransport) RemoveTrack(peerID peer.ID) {
 	t.mu.Lock()
 	delete(t.tracks, peerID)
 	t.mu.Unlock()
@@ -82,14 +88,14 @@ func (t *OpusAudioTransport) Publish(ctx context.Context, opusPackets <-chan []b
 
 func (t *OpusAudioTransport) publishPacket(opusPacket []byte) error {
 	t.mu.RLock()
-	tracks := make(map[string]*opusTrackState, len(t.tracks))
+	tracks := make(map[peer.ID]*opusTrackState, len(t.tracks))
 	for id, state := range t.tracks {
 		tracks[id] = state
 	}
 	t.mu.RUnlock()
 
 	errs := make([]error, 0)
-	for id, state := range tracks {
+	for peerID, state := range tracks {
 		state.mu.Lock()
 		err := state.track.WriteSample(media.Sample{
 			Data:     opusPacket,
@@ -100,20 +106,20 @@ func (t *OpusAudioTransport) publishPacket(opusPacket []byte) error {
 		}
 		state.mu.Unlock()
 		if err != nil {
-			errs = append(errs, fmt.Errorf("publish Opus packet to %s: %w", id, err))
+			errs = append(errs, fmt.Errorf("publish Opus packet to %s: %w", peerID, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (t *OpusAudioTransport) ReadTrack(sourceID string, track *pion.TrackRemote) error {
+func (t *OpusAudioTransport) ReadTrack(peerID peer.ID, track *webrtc.TrackRemote) error {
 	if track == nil {
 		return errors.New("webrtc OpusAudioTransport requires a track")
 	}
-	if track.Kind() != pion.RTPCodecTypeAudio {
+	if track.Kind() != webrtc.RTPCodecTypeAudio {
 		return fmt.Errorf("unsupported track kind %s", track.Kind())
 	}
-	if !strings.EqualFold(track.Codec().MimeType, pion.MimeTypeOpus) {
+	if !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
 		return fmt.Errorf("unsupported audio codec %q", track.Codec().MimeType)
 	}
 
@@ -144,6 +150,6 @@ func (t *OpusAudioTransport) ReadTrack(sourceID string, track *pion.TrackRemote)
 		}
 
 		samples := append([]int16(nil), pcmBuffer[:sampleCount]...)
-		t.output.Push(sourceID, samples)
+		t.output.Push(peerID, samples)
 	}
 }
