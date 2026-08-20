@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,6 +24,12 @@ import (
 func main() {
 	privateKeyFile := flag.String("private-key-file", "", "path to identity seed file (encrypted or plain)")
 	privateKeyPassphrase := flag.String("private-key-passphrase", "", "passphrase for encrypted identity seed file")
+	turnPublicIP := flag.String("turn-public-ip", "", `public IPv4 address for TURN, "auto" to discover it, empty to disable TURN`)
+	turnPort := flag.Int("turn-port", 3478, "TURN/STUN UDP listening port")
+	turnRealm := flag.String("turn-realm", "kwebbel", "TURN authentication realm")
+	turnMinRelayPort := flag.Int("turn-min-relay-port", 50000, "first UDP port available for TURN allocations")
+	turnMaxRelayPort := flag.Int("turn-max-relay-port", 50100, "last UDP port available for TURN allocations")
+	turnCredentialTTL := flag.Duration("turn-credential-ttl", 10*time.Minute, "lifetime of credentials issued over libp2p")
 	flag.Parse()
 
 	// Tune limits for my cheap hetzner
@@ -88,6 +95,42 @@ func main() {
 	host, err := libp2p.New(opts...)
 	if err != nil {
 		panic(err)
+	}
+
+	if *turnPublicIP != "" {
+		if *turnMinRelayPort < 1 || *turnMinRelayPort > 65535 ||
+			*turnMaxRelayPort < 1 || *turnMaxRelayPort > 65535 {
+			log.Fatal("TURN relay ports must be between 1 and 65535")
+		}
+		publicIP := net.ParseIP(*turnPublicIP)
+		if strings.EqualFold(strings.TrimSpace(*turnPublicIP), "auto") {
+			publicIP, err = autodiscoverIP()
+			if err != nil {
+				log.Fatalf("TURN public IP discovery failed: %v", err)
+			}
+			log.Printf("TURN public IP discovered as %s", publicIP)
+		}
+		turnRelay, err := newTURNService(turnServerConfig{
+			PublicIP:      publicIP,
+			ListenPort:    *turnPort,
+			Realm:         *turnRealm,
+			MinRelayPort:  uint16(*turnMinRelayPort),
+			MaxRelayPort:  uint16(*turnMaxRelayPort),
+			CredentialTTL: *turnCredentialTTL,
+		}, host.Peerstore().PrivKey(host.ID()))
+		if err != nil {
+			log.Fatalf("TURN startup failed: %v", err)
+		}
+		defer turnRelay.Close()
+		turnRelay.registerCredentialHandler(host)
+		log.Printf(
+			"TURN/STUN active at %s:%d (relay UDP ports %d-%d, credential protocol %s)",
+			publicIP,
+			*turnPort,
+			*turnMinRelayPort,
+			*turnMaxRelayPort,
+			turnCredentialProtocol,
+		)
 	}
 
 	_, err = relay.New(host, relay.WithResources(resources))
