@@ -4,16 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"sync"
 
 	"github.com/kwebbelkorp/kwebbel/logging"
-	"github.com/kwebbelkorp/kwebbel/rooms"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 )
@@ -39,12 +36,12 @@ type ConnectionEvent struct {
 	State  webrtc.PeerConnectionState
 }
 
+type RemoteTrackCallback func(peer.ID, *webrtc.TrackRemote) error
+
 type WebRTCNegotiator struct {
-	host      host.Host
 	api       *webrtc.API
 	logger    *log.Logger
 	transport *OpusAudioTransport
-	room      *rooms.Room
 	events    chan ConnectionEvent
 
 	mu    sync.RWMutex
@@ -61,36 +58,21 @@ type webrtcPeerState struct {
 
 func NewWebRTCNegotiator(
 	ctx context.Context,
-	h host.Host,
-	room *rooms.Room,
-	audioTransport *OpusAudioTransport,
+	transport *OpusAudioTransport,
 ) *WebRTCNegotiator {
 	logger := logging.FromContext(ctx)
 	return &WebRTCNegotiator{
-		host:      h,
 		api:       newWebRTCAPI(),
 		logger:    logger,
-		transport: audioTransport,
-		room:      room,
 		events:    make(chan ConnectionEvent, 64),
 		peers:     make(map[peer.ID]*webrtcPeerState),
+		transport: transport,
 	}
 }
 
-// Dial opens a libp2p stream and starts the WebRTC offer/answer flow.
-func (n *WebRTCNegotiator) Dial(ctx context.Context, remote peer.AddrInfo) error {
-	n.logf("dial and negotiate start with peer=%s", remote.ID)
-	if remote.ID == n.host.ID() {
-		return errors.New("refusing to dial self")
-	}
-	if !n.isPeerAllowed(remote.ID) {
-		return fmt.Errorf("peer %s is not a member of room %s", remote.ID, n.room.ID)
-	}
-	n.host.Peerstore().AddAddrs(remote.ID, remote.Addrs, peerstore.PermanentAddrTTL)
-	if err := n.host.Connect(ctx, remote); err != nil {
-		return err
-	}
-	stream, err := n.host.NewStream(
+// Negotiate opens a libp2p stream and starts the WebRTC offer/answer flow.
+func (n *WebRTCNegotiator) Negotiate(ctx context.Context, host host.Host, remote peer.AddrInfo) error {
+	stream, err := host.NewStream(
 		network.WithAllowLimitedConn(ctx, string(WebRTCSignalProtocol)),
 		remote.ID,
 		WebRTCSignalProtocol,
@@ -134,11 +116,6 @@ func (n *WebRTCNegotiator) Events() <-chan ConnectionEvent {
 
 func (n *WebRTCNegotiator) handleIncomingSignalStream(stream network.Stream) {
 	remoteID := stream.Conn().RemotePeer()
-	if !n.isPeerAllowed(remoteID) {
-		n.logf("rejected signaling stream from non-allowed peer=%s", remoteID)
-		_ = stream.Reset()
-		return
-	}
 	n.emit(ConnectionEvent{Kind: ConnectionEventPeerDiscovered, PeerID: remoteID})
 	n.logf("incoming signaling stream from peer=%s", remoteID)
 	if _, err := n.createPeerState(remoteID, stream); err != nil {
@@ -265,11 +242,9 @@ func (n *WebRTCNegotiator) createPeerState(remoteID peer.ID, stream network.Stre
 			n.logf("no Opus transport configured; dropping incoming track peer=%s", remoteID)
 			return
 		}
-		go func() {
-			if err := n.transport.ReadTrack(remoteID.String(), track); err != nil {
-				n.logf("incoming track ended peer=%s: %v", remoteID, err)
-			}
-		}()
+		if err := n.transport.AcceptTrack(remoteID, track); err != nil {
+			n.logf("failed to read remote track (%s): %v", remoteID, err)
+		}
 	})
 	n.mu.Lock()
 	n.peers[remoteID] = state
@@ -284,7 +259,7 @@ func (n *WebRTCNegotiator) ensureAudioSender(remoteID peer.ID, state *webrtcPeer
 		return err
 	}
 	if n.transport != nil {
-		n.transport.AddTrack(remoteID.String(), track)
+		n.transport.AddTrack(remoteID, track)
 	}
 	return nil
 }
@@ -297,7 +272,7 @@ func (n *WebRTCNegotiator) Close() {
 
 	for id, state := range peers {
 		if n.transport != nil {
-			n.transport.RemoveTrack(id.String())
+			n.transport.RemoveTrack(id)
 		}
 		if err := state.pc.Close(); err != nil {
 			n.logf("failed closing peer connection (%s): %v", id, err)
@@ -329,15 +304,11 @@ func (n *WebRTCNegotiator) Disconnect(remoteID peer.ID) error {
 	n.mu.Unlock()
 
 	if n.transport != nil {
-		n.transport.RemoveTrack(remoteID.String())
+		n.transport.RemoveTrack(remoteID)
 	}
 	err := state.pc.Close()
 	n.logf("peer state removed peer=%s", remoteID)
 	return err
-}
-
-func (n *WebRTCNegotiator) isPeerAllowed(id peer.ID) bool {
-	return n.room.IsAllowed(id)
 }
 
 func (n *WebRTCNegotiator) logf(format string, args ...any) {
