@@ -1,12 +1,12 @@
 package core
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/kwebbelkorp/kwebbel/audio"
 	"github.com/kwebbelkorp/kwebbel/identity"
 	"github.com/kwebbelkorp/kwebbel/rooms"
-	"github.com/kwebbelkorp/kwebbel/transport"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -17,29 +17,27 @@ type MCAttributes struct {
 }
 
 type Kwebbelaar struct {
-	host         host.Host
-	identity     *identity.IdentityManager
-	audioEgress  *audio.AudioEgress
-	webrtcBridge *transport.WebRTCAudioBridge
-	room         *rooms.Room
-	mcServer     *rooms.MCServer
+	host        host.Host
+	identity    *identity.IdentityManager
+	audioEgress *audio.AudioEgress
+	room        *rooms.Room
+	mcServer    *rooms.MCServer
 }
 
-func NewKwebbelaar(host host.Host, identity *identity.IdentityManager, webrtcBridge *transport.WebRTCAudioBridge) *Kwebbelaar {
+func NewKwebbelaar(host host.Host, identity *identity.IdentityManager) *Kwebbelaar {
 	return &Kwebbelaar{
-		host:         host,
-		identity:     identity,
-		webrtcBridge: webrtcBridge,
+		host:     host,
+		identity: identity,
 	}
 }
 
-func (k *Kwebbelaar) HostRoom(room *rooms.Room) error {
+func (k *Kwebbelaar) HostRoom(ctx context.Context, room *rooms.Room) error {
 	if k.room != nil {
 		return fmt.Errorf("you are already attending a room")
 	}
 	room.AddPeer(peer.ID(k.host.ID()))
 	mcServer := rooms.NewMCServer(room)
-	mcServer.Serve()
+	mcServer.Serve(ctx)
 	k.host.SetStreamHandler(rooms.RoomProtocol, mcServer.AttachStream)
 	k.room = room
 	k.mcServer = mcServer

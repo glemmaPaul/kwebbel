@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -22,6 +24,55 @@ type fakeNegotiator struct {
 	events  chan ConnectionEvent
 }
 
+type fakePeerList struct {
+	mu      sync.RWMutex
+	peers   []peer.ID
+	allowed map[peer.ID]struct{}
+}
+
+func newFakePeerList(peers ...peer.ID) *fakePeerList {
+	allowed := make(map[peer.ID]struct{}, len(peers))
+	for _, id := range peers {
+		allowed[id] = struct{}{}
+	}
+	return &fakePeerList{
+		peers:   append([]peer.ID(nil), peers...),
+		allowed: allowed,
+	}
+}
+
+func (l *fakePeerList) GetPeers() []peer.ID {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return append([]peer.ID(nil), l.peers...)
+}
+
+func (l *fakePeerList) IsAllowed(id peer.ID) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	_, ok := l.allowed[id]
+	return ok
+}
+
+func (l *fakePeerList) disallow(id peer.ID) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.allowed, id)
+}
+
+func (l *fakePeerList) remove(id peer.ID) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.allowed, id)
+	peers := l.peers[:0]
+	for _, candidate := range l.peers {
+		if candidate != id {
+			peers = append(peers, candidate)
+		}
+	}
+	l.peers = peers
+}
+
 func newFakeNegotiator() *fakeNegotiator {
 	return &fakeNegotiator{
 		started: make(chan peer.ID, 10),
@@ -30,7 +81,7 @@ func newFakeNegotiator() *fakeNegotiator {
 	}
 }
 
-func (n *fakeNegotiator) Dial(ctx context.Context, remote peer.AddrInfo) error {
+func (n *fakeNegotiator) Negotiate(ctx context.Context, host host.Host, remote peer.AddrInfo) error {
 	n.mu.Lock()
 	n.calls++
 	wait := n.wait
@@ -63,12 +114,19 @@ func (n *fakeNegotiator) callCount() int {
 }
 
 func TestPeerConnectionsSchedulesAndTracksDialFailure(t *testing.T) {
+	fakeMock := mocknet.New()
 	negotiator := newFakeNegotiator()
 	negotiator.err = errors.New("dial failed")
-	connections := NewPeerConnections(context.Background(), negotiator, testRetryPolicy())
+	peerID := peer.ID("peer-a")
+	connections := NewPeerConnections(
+		context.Background(),
+		fakeMock.Host(peer.ID("self")),
+		negotiator,
+		newFakePeerList(peerID),
+		testRetryPolicy(),
+	)
 	defer connections.Close()
 
-	peerID := peer.ID("peer-a")
 	connections.Track(peer.AddrInfo{ID: peerID})
 	awaitDial(t, negotiator, peerID)
 	awaitStatus(t, connections, peerID, func(status PeerConnectionStatus) bool {
@@ -86,11 +144,18 @@ func TestPeerConnectionsSchedulesAndTracksDialFailure(t *testing.T) {
 }
 
 func TestPeerConnectionsDoesNotRedialConnectingPeer(t *testing.T) {
+	fakeMock := mocknet.New()
 	negotiator := newFakeNegotiator()
-	connections := NewPeerConnections(context.Background(), negotiator, testRetryPolicy())
+	peerID := peer.ID("peer-a")
+	connections := NewPeerConnections(
+		context.Background(),
+		fakeMock.Host(peer.ID("self")),
+		negotiator,
+		newFakePeerList(peerID),
+		testRetryPolicy(),
+	)
 	defer connections.Close()
 
-	peerID := peer.ID("peer-a")
 	connections.Track(peer.AddrInfo{ID: peerID})
 	awaitDial(t, negotiator, peerID)
 	negotiator.events <- ConnectionEvent{
@@ -109,12 +174,19 @@ func TestPeerConnectionsDoesNotRedialConnectingPeer(t *testing.T) {
 }
 
 func TestPeerConnectionsDialPreventsDuplicatesAndTimesOut(t *testing.T) {
+	fakeMock := mocknet.New()
 	negotiator := newFakeNegotiator()
 	negotiator.wait = true
-	connections := NewPeerConnections(context.Background(), negotiator, testRetryPolicy())
+	remote := peer.AddrInfo{ID: peer.ID("peer-a")}
+	connections := NewPeerConnections(
+		context.Background(),
+		fakeMock.Host(peer.ID("self")),
+		negotiator,
+		newFakePeerList(remote.ID),
+		testRetryPolicy(),
+	)
 	defer connections.Close()
 
-	remote := peer.AddrInfo{ID: peer.ID("peer-a")}
 	result := make(chan error, 1)
 	go func() {
 		result <- connections.Dial(context.Background(), remote)
@@ -132,17 +204,66 @@ func TestPeerConnectionsDialPreventsDuplicatesAndTimesOut(t *testing.T) {
 	}
 }
 
-func TestPeerConnectionsSyncPeers(t *testing.T) {
+func TestPeerConnectionsRejectsDisallowedDial(t *testing.T) {
+	fakeMock := mocknet.New()
 	negotiator := newFakeNegotiator()
-	connections := NewPeerConnections(context.Background(), negotiator, DefaultRetryPolicy())
+	remote := peer.AddrInfo{ID: peer.ID("peer-a")}
+	connections := NewPeerConnections(
+		context.Background(),
+		fakeMock.Host(peer.ID("self")),
+		negotiator,
+		newFakePeerList(),
+		testRetryPolicy(),
+	)
 	defer connections.Close()
 
+	if err := connections.Dial(context.Background(), remote); err == nil {
+		t.Fatal("disallowed dial should return an error")
+	}
+	if connections.IsTracked(remote.ID) {
+		t.Fatal("disallowed peer should not be tracked")
+	}
+	if got := negotiator.callCount(); got != 0 {
+		t.Fatalf("negotiator dial count = %d, want 0", got)
+	}
+}
+
+func TestPeerConnectionsReconcilesPeerList(t *testing.T) {
+	fakeMock := mocknet.New()
+	negotiator := newFakeNegotiator()
 	self := peer.ID("self")
 	kept := peer.ID("kept")
 	removed := peer.ID("removed")
-	connections.Track(peer.AddrInfo{ID: removed})
-	if err := connections.SyncPeers([]peer.ID{self, kept}, self); err != nil {
-		t.Fatalf("sync peers: %v", err)
+	denied := peer.ID("denied")
+	peerList := newFakePeerList(self, kept, removed, denied)
+	peerList.disallow(denied)
+	connections := NewPeerConnections(
+		context.Background(),
+		fakeMock.Host(peer.ID("self")),
+		negotiator,
+		peerList,
+		testRetryPolicy(),
+	)
+	defer connections.Close()
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if connections.IsTracked(kept) && connections.IsTracked(removed) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !connections.IsTracked(removed) {
+		t.Fatal("initial room member should be tracked")
+	}
+
+	peerList.remove(removed)
+	deadline = time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !connections.IsTracked(removed) {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
 
 	if connections.IsTracked(self) {
@@ -153,6 +274,9 @@ func TestPeerConnectionsSyncPeers(t *testing.T) {
 	}
 	if connections.IsTracked(removed) {
 		t.Fatal("peer outside room should be untracked")
+	}
+	if connections.IsTracked(denied) {
+		t.Fatal("peer rejected by IsAllowed should not be tracked")
 	}
 	select {
 	case got := <-negotiator.closed:
@@ -165,11 +289,18 @@ func TestPeerConnectionsSyncPeers(t *testing.T) {
 }
 
 func TestPeerConnectionsTracksDiscoveredPeerEvent(t *testing.T) {
+	fakeMock := mocknet.New()
 	negotiator := newFakeNegotiator()
-	connections := NewPeerConnections(context.Background(), negotiator, DefaultRetryPolicy())
+	peerID := peer.ID("incoming")
+	connections := NewPeerConnections(
+		context.Background(),
+		fakeMock.Host(peer.ID("self")),
+		negotiator,
+		newFakePeerList(peerID),
+		DefaultRetryPolicy(),
+	)
 	defer connections.Close()
 
-	peerID := peer.ID("incoming")
 	negotiator.events <- ConnectionEvent{
 		Kind:   ConnectionEventPeerDiscovered,
 		PeerID: peerID,
@@ -224,6 +355,3 @@ func awaitStatus(
 	status, _ := connections.Status(peerID)
 	t.Fatalf("timed out waiting for status, last value: %+v", status)
 }
-
-var _ Negotiator = (*fakeNegotiator)(nil)
-var _ PeerConnectionManager = (*PeerConnections)(nil)

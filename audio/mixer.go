@@ -2,6 +2,8 @@ package audio
 
 import (
 	"sync"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 var (
@@ -24,12 +26,12 @@ func NewMixer() *Mixer {
 
 // Push adds new audio from a specific peer to their buffer.
 // Call this from your Network Reader loop after decoding Opus -> Int16
-func (m *Mixer) Push(peerID string, pcmData []int16) {
+func (m *Mixer) Push(peerID peer.ID, pcmData []int16) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Append data to this peer's specific buffer
-	m.peerBuffers[peerID] = append(m.peerBuffers[peerID], pcmData...)
+	m.peerBuffers[peerID.String()] = append(m.peerBuffers[peerID.String()], pcmData...)
 }
 
 // GetMixedSamples is called by AudioOutput (Malgo)

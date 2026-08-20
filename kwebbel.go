@@ -51,6 +51,7 @@ func main() {
 	}
 
 	roomKey, err := im.DeriveRoomKey("default", "default")
+	room := rooms.NewRoom("default")
 	host, err := conn.NewHost(0, roomKey, false)
 	if err != nil {
 		log.Fatal(err)
@@ -64,14 +65,13 @@ func main() {
 	fmt.Println("libp2p node address:", addrs[0])
 	mixer := audio.NewMixer()
 	audioTransport := transport.NewOpusAudioTransport(mixer)
-	room := rooms.NewRoom("default")
 
-	negotiator := transport.NewWebRTCNegotiator(ctx, host, room, audioTransport)
-	peerConnections := transport.NewPeerConnections(ctx, negotiator, transport.DefaultRetryPolicy())
-	wrb := transport.NewWebRTCAudioBridge(ctx, host, room, peerConnections)
+	wrn := transport.NewWebRTCNegotiator(ctx, audioTransport)
+	peerConnections := transport.NewPeerConnections(ctx, host, wrn, room, transport.DefaultRetryPolicy())
+	wrb := transport.NewWebRTCAudioBridge(ctx, host, peerConnections)
 	relayManager := conn.NewRelayManager(host)
 
-	kwebbelaar := core.NewKwebbelaar(host, im, wrb)
+	kwebbelaar := core.NewKwebbelaar(host, im)
 
 	outputErr := kwebbelaar.StartAudioOutput(mixer)
 	if outputErr != nil {
@@ -79,7 +79,7 @@ func main() {
 	}
 
 	if *connectTo == "" {
-		kwebbelaar.HostRoom(room)
+		kwebbelaar.HostRoom(ctx, room)
 	} else {
 		host.SetStreamHandler(rooms.RoomProtocol, func(s network.Stream) {
 			log.Println("Incoming room stream from:", s.Conn().RemotePeer())
@@ -143,13 +143,7 @@ func main() {
 			logger.Fatal(err)
 		}
 
-		signals := &rooms.RoomListenerSignals{
-			OnUpdatedAllowedPeers: func(peers []peer.ID) {
-				logger.Println("Allowed peers updated:", peers)
-				wrb.SyncRoomPeers()
-			},
-		}
-		listener := rooms.NewRoomListener(roomStream, room, signals)
+		listener := rooms.NewRoomListener(roomStream, room, nil)
 
 		joinCtx, joinCancel := context.WithTimeout(ctx, 10*time.Second)
 		err = listener.Join(joinCtx, rooms.JoinRequest{
@@ -161,7 +155,7 @@ func main() {
 		}
 		listener.Start()
 
-		if err := wrb.Dial(ctx, *connectToAddr); err != nil {
+		if err := peerConnections.Dial(ctx, *connectToAddr); err != nil {
 			logger.Printf("Initial WebRTC dial failed; retries remain active for %s: %v", connectToAddr.ID, err)
 		}
 	}

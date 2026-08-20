@@ -3,9 +3,13 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"sync"
 	"time"
 
+	"github.com/kwebbelkorp/kwebbel/logging"
+	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/pion/webrtc/v4"
@@ -30,10 +34,15 @@ func DefaultRetryPolicy() RetryPolicy {
 }
 
 type Negotiator interface {
-	Dial(ctx context.Context, remote peer.AddrInfo) error
+	Negotiate(ctx context.Context, host host.Host, remote peer.AddrInfo) error
 	Disconnect(id peer.ID) error
 	HandleSignalStream(stream network.Stream)
 	Events() <-chan ConnectionEvent
+}
+
+type PeerList interface {
+	GetPeers() []peer.ID
+	IsAllowed(id peer.ID) bool
 }
 
 type PeerConnectionStatus struct {
@@ -51,7 +60,6 @@ type PeerConnectionManager interface {
 	StreamHandler() func(stream network.Stream)
 	Dial(ctx context.Context, remote peer.AddrInfo) error
 	Track(remote peer.AddrInfo)
-	SyncPeers(peers []peer.ID, self peer.ID) error
 	Untrack(id peer.ID) error
 	IsTracked(id peer.ID) bool
 	TrackedPeerIDs() []peer.ID
@@ -72,26 +80,39 @@ type managedPeerState struct {
 
 // PeerConnections owns peer tracking, negotiation attempts, and retry state.
 type PeerConnections struct {
-	mu         sync.RWMutex
-	peers      map[peer.ID]*managedPeerState
-	policy     RetryPolicy
-	negotiator Negotiator
-	ctx        context.Context
-	cancel     context.CancelFunc
-	closed     chan struct{}
-	closeOnce  sync.Once
+	mu           sync.RWMutex
+	host         host.Host
+	peers        map[peer.ID]*managedPeerState
+	policy       RetryPolicy
+	negotiator   Negotiator
+	allowedPeers PeerList
+	logger       *log.Logger
+	ctx          context.Context
+	cancel       context.CancelFunc
+	closed       chan struct{}
+	closeOnce    sync.Once
 }
 
-func NewPeerConnections(ctx context.Context, negotiator Negotiator, policy RetryPolicy) *PeerConnections {
+func NewPeerConnections(
+	ctx context.Context,
+	host host.Host,
+	negotiator Negotiator,
+	allowedPeers PeerList,
+	policy RetryPolicy,
+) *PeerConnections {
 	policy = normalizeRetryPolicy(policy)
+	logger := logging.FromContext(ctx)
 	cancelCtx, cancel := context.WithCancel(ctx)
 	p := &PeerConnections{
-		peers:      make(map[peer.ID]*managedPeerState),
-		policy:     policy,
-		negotiator: negotiator,
-		ctx:        cancelCtx,
-		cancel:     cancel,
-		closed:     make(chan struct{}),
+		host:         host,
+		peers:        make(map[peer.ID]*managedPeerState),
+		policy:       policy,
+		negotiator:   negotiator,
+		allowedPeers: allowedPeers,
+		logger:       logger,
+		ctx:          cancelCtx,
+		cancel:       cancel,
+		closed:       make(chan struct{}),
 	}
 	go p.schedule()
 	return p
@@ -122,6 +143,11 @@ func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
 
 func (p *PeerConnections) StreamHandler() func(stream network.Stream) {
 	return func(stream network.Stream) {
+		remoteID := stream.Conn().RemotePeer()
+		if !p.isAllowed(remoteID) {
+			_ = stream.Reset()
+			return
+		}
 		p.negotiator.HandleSignalStream(stream)
 	}
 }
@@ -131,6 +157,9 @@ func (p *PeerConnections) Dial(ctx context.Context, remote peer.AddrInfo) error 
 	case <-p.closed:
 		return errors.New("peer connections is closed")
 	default:
+	}
+	if !p.isAllowed(remote.ID) {
+		return fmt.Errorf("peer %s is not allowed", remote.ID)
 	}
 	p.Track(remote)
 	info, shouldDial := p.beginDial(remote.ID)
@@ -160,11 +189,12 @@ func (p *PeerConnections) Track(remote peer.AddrInfo) {
 	}
 }
 
-func (p *PeerConnections) SyncPeers(peers []peer.ID, self peer.ID) error {
+func (p *PeerConnections) syncPeers() error {
 	now := time.Now()
+	peers := p.allowedPeers.GetPeers()
 	allowed := make(map[peer.ID]struct{}, len(peers))
 	for _, id := range peers {
-		if id != self {
+		if p.isAllowed(id) {
 			allowed[id] = struct{}{}
 		}
 	}
@@ -189,6 +219,10 @@ func (p *PeerConnections) SyncPeers(peers []peer.ID, self peer.ID) error {
 	p.mu.Unlock()
 
 	return disconnectPeers(negotiator, removed)
+}
+
+func (p *PeerConnections) isAllowed(id peer.ID) bool {
+	return id != p.host.ID() && p.allowedPeers.IsAllowed(id)
 }
 
 func (p *PeerConnections) Untrack(id peer.ID) error {
@@ -265,7 +299,7 @@ func (p *PeerConnections) dial(ctx context.Context, remote peer.AddrInfo) error 
 	defer cancel()
 	stopCancel := context.AfterFunc(p.ctx, cancel)
 	defer stopCancel()
-	err := negotiator.Dial(dialCtx, remote)
+	err := negotiator.Negotiate(dialCtx, p.host, remote)
 	p.completeDial(remote.ID, err)
 	return err
 }
@@ -375,13 +409,17 @@ func (p *PeerConnections) schedule() {
 			}
 			switch event.Kind {
 			case ConnectionEventPeerDiscovered:
-				p.Track(peer.AddrInfo{ID: event.PeerID})
+				if p.isAllowed(event.PeerID) {
+					p.Track(peer.AddrInfo{ID: event.PeerID})
+				}
 			case ConnectionEventStateChanged:
 				p.updateState(event)
 			}
 		case now := <-ticker.C:
+			_ = p.syncPeers()
 			for _, remote := range p.pendingDials(now) {
 				go func() {
+					p.logger.Printf("Dialing peer %s", remote.ID)
 					_ = p.dial(p.ctx, remote)
 				}()
 			}
