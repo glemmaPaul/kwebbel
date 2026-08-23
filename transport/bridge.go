@@ -15,25 +15,25 @@ const (
 
 // WebRTCAudioBridge is the room-scoped façade for peer negotiation and audio.
 type WebRTCAudioBridge struct {
-	host        host.Host
-	connections PeerConnectionManager
-	logger      *log.Logger
-	closed      chan struct{}
+	host    host.Host
+	tracker *PeerTracker
+	logger  *log.Logger
+	closed  chan struct{}
 }
 
 func NewWebRTCAudioBridge(
 	ctx context.Context,
 	h host.Host,
-	connections PeerConnectionManager) *WebRTCAudioBridge {
+	tracker *PeerTracker) *WebRTCAudioBridge {
 	logger := logging.FromContext(ctx)
 	bridge := &WebRTCAudioBridge{
-		host:        h,
-		connections: connections,
-		logger:      logger,
-		closed:      make(chan struct{}),
+		host:    h,
+		tracker: tracker,
+		logger:  logger,
+		closed:  make(chan struct{}),
 	}
 
-	h.SetStreamHandler(WebRTCSignalProtocol, connections.StreamHandler())
+	h.SetStreamHandler(WebRTCSignalProtocol, tracker.StreamHandler())
 	logger.Printf("bridge initialized, signaling protocol=%s", WebRTCSignalProtocol)
 	return bridge
 }
@@ -45,7 +45,7 @@ func (b *WebRTCAudioBridge) Close() {
 	default:
 		close(b.closed)
 	}
-	b.connections.Close()
+	b.tracker.Close()
 }
 
 func (b *WebRTCAudioBridge) logf(format string, args ...any) {

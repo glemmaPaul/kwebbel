@@ -22,7 +22,6 @@ import (
 	"github.com/kwebbelkorp/kwebbel/tui"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -31,6 +30,8 @@ func main() {
 	relayPeerId := flag.String("relay-peer-id", "12D3KooWNCttbqRdEeF1vaSuZBKns61jmzzGRp5DZuU1wpYsWg72", "relay peer id")
 	relayIp := flag.String("relay-ip", "89.167.83.252", "relay ip")
 	tuiEnabled := flag.Bool("tui", false, "enable tui")
+	becomeHost := flag.Bool("host-room", false, "become host")
+	hostRoomName := flag.String("host-room-name", "default", "name of the room to host")
 
 	flag.Parse()
 
@@ -50,8 +51,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	roomKey, err := im.DeriveRoomKey("default", "default")
-	room := rooms.NewRoom("default")
+	roomKey, err := im.DeriveRoomKey(*hostRoomName, *hostRoomName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	room := rooms.NewRoom(*hostRoomName)
 	host, err := conn.NewHost(0, roomKey, false)
 	if err != nil {
 		log.Fatal(err)
@@ -62,24 +66,29 @@ func main() {
 		Addrs: host.Addrs(),
 	}
 	addrs, err := peer.AddrInfoToP2pAddrs(&peerInfo)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println("libp2p node address:", addrs[0])
 	mixer := audio.NewMixer()
 	audioTransport := transport.NewOpusAudioTransport(mixer)
 
 	wrn := transport.NewWebRTCNegotiator(ctx, audioTransport)
-	peerConnections := transport.NewPeerConnections(ctx, host, wrn, room, transport.DefaultRetryPolicy())
-	wrb := transport.NewWebRTCAudioBridge(ctx, host, peerConnections)
+	peerTracker := transport.NewPeerTracker(ctx, host, wrn, room, transport.DefaultRetryPolicy())
+	wrb := transport.NewWebRTCAudioBridge(ctx, host, peerTracker)
 	relayManager := conn.NewRelayManager(host)
 
-	kwebbelaar := core.NewKwebbelaar(host, im)
+	kwebbelaar := core.NewKwebbelaar(host, im, room, peerTracker)
 
 	outputErr := kwebbelaar.StartAudioOutput(mixer)
 	if outputErr != nil {
 		log.Fatal(outputErr)
 	}
 
-	if *connectTo == "" {
-		kwebbelaar.HostRoom(ctx, room)
+	if *becomeHost {
+		if err := kwebbelaar.HostRoom(ctx); err != nil {
+			log.Fatal(err)
+		}
 	} else {
 		host.SetStreamHandler(rooms.RoomProtocol, func(s network.Stream) {
 			log.Println("Incoming room stream from:", s.Conn().RemotePeer())
@@ -121,42 +130,13 @@ func main() {
 	})
 
 	if *connectTo != "" {
-		maddr, err := multiaddr.NewMultiaddr(*connectTo)
+		connectToAddr, err := conn.ParseConnectAddr(*connectTo)
 		if err != nil {
-			log.Printf("Invalid address: %v", err)
 			log.Fatal(err)
 		}
-		log.Println("Connecting to", *connectTo)
-		connectToAddr, err := peer.AddrInfoFromP2pAddr(maddr)
+		err = kwebbelaar.Attend(ctx, connectToAddr)
 		if err != nil {
-			log.Printf("AddrInfo error: %v", err)
 			log.Fatal(err)
-		}
-
-		// Relay connections are "limited" - must opt-in to use them for streams
-		host.Peerstore().AddAddrs(connectToAddr.ID, connectToAddr.Addrs, peerstore.PermanentAddrTTL)
-
-		log.Printf("Opening room stream to: %s", connectToAddr.ID)
-		roomStream, err := host.NewStream(network.WithAllowLimitedConn(ctx, string(rooms.RoomProtocol)), connectToAddr.ID, rooms.RoomProtocol)
-		if err != nil {
-			logger.Println("Error creating message stream to", connectToAddr.ID, err)
-			logger.Fatal(err)
-		}
-
-		listener := rooms.NewRoomListener(roomStream, room, nil)
-
-		joinCtx, joinCancel := context.WithTimeout(ctx, 10*time.Second)
-		err = listener.Join(joinCtx, rooms.JoinRequest{
-			PeerID: host.ID().String(),
-		})
-		joinCancel()
-		if err != nil {
-			logger.Fatalf("Failed to join room hosted by %s: %v", connectToAddr.ID, err)
-		}
-		listener.Start()
-
-		if err := peerConnections.Dial(ctx, *connectToAddr); err != nil {
-			logger.Printf("Initial WebRTC dial failed; retries remain active for %s: %v", connectToAddr.ID, err)
 		}
 	}
 
@@ -171,17 +151,18 @@ func main() {
 						ui.SetStatus("Peer ID is invalid")
 						return
 					}
-					relay, err := relayManager.TryPeer(ctx, peerId)
+					connectToAddr, err := relayManager.TryPeer(ctx, peerId)
 					if err != nil {
 						ui.SetStatus(fmt.Sprintf("Failed to connect to %s: could not find relay", peerId.String()))
 						return
 					}
-					ui.SetStatus(fmt.Sprintf("Found connection through relay %s", relay.ID.String()))
+					ui.SetStatus(fmt.Sprintf("Found connection through relay %s", connectToAddr.ID.String()))
 					time.Sleep(400 * time.Millisecond)
 					ui.EnterCall([]tui.Caller{
 						{ID: "local", Label: "You", Local: true},
 						{ID: peerId.String(), Label: "Peer"},
 					})
+
 				}()
 			},
 			OnMute: func() {

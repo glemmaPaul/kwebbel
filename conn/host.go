@@ -7,6 +7,7 @@ import (
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -31,4 +32,12 @@ func NewHost(port int, prvKey crypto.PrivKey, isLocal bool) (host.Host, error) {
 		libp2p.EnableHolePunching(),
 		libp2p.ForceReachabilityPrivate(),
 	)
+}
+
+func ParseConnectAddr(addr string) (*peer.AddrInfo, error) {
+	maddr, err := multiaddr.NewMultiaddr(addr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid address: %v", err)
+	}
+	return peer.AddrInfoFromP2pAddr(maddr)
 }

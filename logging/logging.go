@@ -14,5 +14,10 @@ func WithLogger(ctx context.Context, logger *log.Logger) context.Context {
 }
 
 func FromContext(ctx context.Context) *log.Logger {
-	return ctx.Value(loggerKey).(*log.Logger)
+	if ctx != nil {
+		if logger, ok := ctx.Value(loggerKey).(*log.Logger); ok && logger != nil {
+			return logger
+		}
+	}
+	return log.Default()
 }

@@ -45,7 +45,7 @@ type PeerList interface {
 	IsAllowed(id peer.ID) bool
 }
 
-type PeerConnectionStatus struct {
+type PeerStatus struct {
 	PeerID          peer.ID
 	Connected       bool
 	Connecting      bool
@@ -56,18 +56,7 @@ type PeerConnectionStatus struct {
 	LastConnectedAt time.Time
 }
 
-type PeerConnectionManager interface {
-	StreamHandler() func(stream network.Stream)
-	Dial(ctx context.Context, remote peer.AddrInfo) error
-	Track(remote peer.AddrInfo)
-	Untrack(id peer.ID) error
-	IsTracked(id peer.ID) bool
-	TrackedPeerIDs() []peer.ID
-	Status(id peer.ID) (PeerConnectionStatus, bool)
-	Close()
-}
-
-type managedPeerState struct {
+type trackedPeer struct {
 	info            peer.AddrInfo
 	connected       bool
 	connecting      bool
@@ -78,11 +67,13 @@ type managedPeerState struct {
 	lastConnectedAt time.Time
 }
 
-// PeerConnections owns peer tracking, negotiation attempts, and retry state.
-type PeerConnections struct {
+// PeerTracker is the desired-state loop for the voice mesh.
+// It tracks which peers should stay connected, reconciles that set with the
+// room allowlist, drives negotiation attempts, and keeps retry state.
+type PeerTracker struct {
 	mu           sync.RWMutex
 	host         host.Host
-	peers        map[peer.ID]*managedPeerState
+	peers        map[peer.ID]*trackedPeer
 	policy       RetryPolicy
 	negotiator   Negotiator
 	allowedPeers PeerList
@@ -93,19 +84,19 @@ type PeerConnections struct {
 	closeOnce    sync.Once
 }
 
-func NewPeerConnections(
+func NewPeerTracker(
 	ctx context.Context,
 	host host.Host,
 	negotiator Negotiator,
 	allowedPeers PeerList,
 	policy RetryPolicy,
-) *PeerConnections {
+) *PeerTracker {
 	policy = normalizeRetryPolicy(policy)
 	logger := logging.FromContext(ctx)
 	cancelCtx, cancel := context.WithCancel(ctx)
-	p := &PeerConnections{
+	p := &PeerTracker{
 		host:         host,
-		peers:        make(map[peer.ID]*managedPeerState),
+		peers:        make(map[peer.ID]*trackedPeer),
 		policy:       policy,
 		negotiator:   negotiator,
 		allowedPeers: allowedPeers,
@@ -118,30 +109,7 @@ func NewPeerConnections(
 	return p
 }
 
-func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
-	defaults := DefaultRetryPolicy()
-	if policy.InitialBackoff <= 0 {
-		policy.InitialBackoff = defaults.InitialBackoff
-	}
-	if policy.MaxBackoff < policy.InitialBackoff {
-		policy.MaxBackoff = defaults.MaxBackoff
-		if policy.MaxBackoff < policy.InitialBackoff {
-			policy.MaxBackoff = policy.InitialBackoff
-		}
-	}
-	if policy.RetryInterval <= 0 {
-		policy.RetryInterval = defaults.RetryInterval
-	}
-	if policy.DialTimeout <= 0 {
-		policy.DialTimeout = defaults.DialTimeout
-	}
-	if policy.ConnectTimeout <= 0 {
-		policy.ConnectTimeout = defaults.ConnectTimeout
-	}
-	return policy
-}
-
-func (p *PeerConnections) StreamHandler() func(stream network.Stream) {
+func (p *PeerTracker) StreamHandler() func(stream network.Stream) {
 	return func(stream network.Stream) {
 		remoteID := stream.Conn().RemotePeer()
 		if !p.isAllowed(remoteID) {
@@ -152,10 +120,10 @@ func (p *PeerConnections) StreamHandler() func(stream network.Stream) {
 	}
 }
 
-func (p *PeerConnections) Dial(ctx context.Context, remote peer.AddrInfo) error {
+func (p *PeerTracker) Dial(ctx context.Context, remote peer.AddrInfo) error {
 	select {
 	case <-p.closed:
-		return errors.New("peer connections is closed")
+		return errors.New("peer tracker is closed")
 	default:
 	}
 	if !p.isAllowed(remote.ID) {
@@ -169,7 +137,7 @@ func (p *PeerConnections) Dial(ctx context.Context, remote peer.AddrInfo) error 
 	return p.dial(ctx, info)
 }
 
-func (p *PeerConnections) Track(remote peer.AddrInfo) {
+func (p *PeerTracker) Track(remote peer.AddrInfo) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -183,13 +151,18 @@ func (p *PeerConnections) Track(remote peer.AddrInfo) {
 		return
 	}
 
-	p.peers[remote.ID] = &managedPeerState{
+	p.peers[remote.ID] = &trackedPeer{
 		info:        remote,
 		nextAttempt: time.Now(),
 	}
 }
 
-func (p *PeerConnections) syncPeers() error {
+// SyncPeers immediately reconciles tracked peers with the current allowlist.
+func (p *PeerTracker) SyncPeers() error {
+	return p.syncPeers()
+}
+
+func (p *PeerTracker) syncPeers() error {
 	now := time.Now()
 	peers := p.allowedPeers.GetPeers()
 	allowed := make(map[peer.ID]struct{}, len(peers))
@@ -202,7 +175,7 @@ func (p *PeerConnections) syncPeers() error {
 	p.mu.Lock()
 	for id := range allowed {
 		if _, tracked := p.peers[id]; !tracked {
-			p.peers[id] = &managedPeerState{
+			p.peers[id] = &trackedPeer{
 				info:        peer.AddrInfo{ID: id},
 				nextAttempt: now,
 			}
@@ -221,11 +194,11 @@ func (p *PeerConnections) syncPeers() error {
 	return disconnectPeers(negotiator, removed)
 }
 
-func (p *PeerConnections) isAllowed(id peer.ID) bool {
+func (p *PeerTracker) isAllowed(id peer.ID) bool {
 	return id != p.host.ID() && p.allowedPeers.IsAllowed(id)
 }
 
-func (p *PeerConnections) Untrack(id peer.ID) error {
+func (p *PeerTracker) Untrack(id peer.ID) error {
 	p.mu.Lock()
 	delete(p.peers, id)
 	negotiator := p.negotiator
@@ -233,14 +206,14 @@ func (p *PeerConnections) Untrack(id peer.ID) error {
 	return disconnectPeers(negotiator, []peer.ID{id})
 }
 
-func (p *PeerConnections) IsTracked(id peer.ID) bool {
+func (p *PeerTracker) IsTracked(id peer.ID) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	_, ok := p.peers[id]
 	return ok
 }
 
-func (p *PeerConnections) TrackedPeerIDs() []peer.ID {
+func (p *PeerTracker) TrackedPeerIDs() []peer.ID {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -251,15 +224,15 @@ func (p *PeerConnections) TrackedPeerIDs() []peer.ID {
 	return ids
 }
 
-func (p *PeerConnections) Status(id peer.ID) (PeerConnectionStatus, bool) {
+func (p *PeerTracker) Status(id peer.ID) (PeerStatus, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	state, ok := p.peers[id]
 	if !ok {
-		return PeerConnectionStatus{}, false
+		return PeerStatus{}, false
 	}
-	return PeerConnectionStatus{
+	return PeerStatus{
 		PeerID:          id,
 		Connected:       state.connected,
 		Connecting:      state.connecting,
@@ -271,7 +244,7 @@ func (p *PeerConnections) Status(id peer.ID) (PeerConnectionStatus, bool) {
 	}, true
 }
 
-func (p *PeerConnections) beginDial(id peer.ID) (peer.AddrInfo, bool) {
+func (p *PeerTracker) beginDial(id peer.ID) (peer.AddrInfo, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -283,14 +256,14 @@ func (p *PeerConnections) beginDial(id peer.ID) (peer.AddrInfo, bool) {
 	return state.info, true
 }
 
-func (p *PeerConnections) dial(ctx context.Context, remote peer.AddrInfo) error {
+func (p *PeerTracker) dial(ctx context.Context, remote peer.AddrInfo) error {
 	p.mu.RLock()
 	negotiator := p.negotiator
 	timeout := p.policy.DialTimeout
 	p.mu.RUnlock()
 
 	if negotiator == nil {
-		err := errors.New("peer connections requires a negotiator")
+		err := errors.New("peer tracker requires a negotiator")
 		p.completeDial(remote.ID, err)
 		return err
 	}
@@ -304,7 +277,7 @@ func (p *PeerConnections) dial(ctx context.Context, remote peer.AddrInfo) error 
 	return err
 }
 
-func (p *PeerConnections) completeDial(id peer.ID, err error) {
+func (p *PeerTracker) completeDial(id peer.ID, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -326,7 +299,7 @@ func (p *PeerConnections) completeDial(id peer.ID, err error) {
 	state.nextAttempt = time.Now().Add(p.retryBackoff(state.retryCount))
 }
 
-func (p *PeerConnections) updateState(event ConnectionEvent) {
+func (p *PeerTracker) updateState(event ConnectionEvent) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -364,7 +337,7 @@ func (p *PeerConnections) updateState(event ConnectionEvent) {
 	}
 }
 
-func (p *PeerConnections) Close() {
+func (p *PeerTracker) Close() {
 	p.closeOnce.Do(func() {
 		p.cancel()
 		close(p.closed)
@@ -393,7 +366,7 @@ func disconnectPeers(negotiator Negotiator, ids []peer.ID) error {
 	return errors.Join(errs...)
 }
 
-func (p *PeerConnections) schedule() {
+func (p *PeerTracker) schedule() {
 	ticker := time.NewTicker(p.policy.RetryInterval)
 	defer ticker.Stop()
 	events := p.negotiator.Events()
@@ -427,7 +400,7 @@ func (p *PeerConnections) schedule() {
 	}
 }
 
-func (p *PeerConnections) pendingDials(now time.Time) []peer.AddrInfo {
+func (p *PeerTracker) pendingDials(now time.Time) []peer.AddrInfo {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -446,7 +419,7 @@ func (p *PeerConnections) pendingDials(now time.Time) []peer.AddrInfo {
 	return remotes
 }
 
-func (p *PeerConnections) retryBackoff(retries int) time.Duration {
+func (p *PeerTracker) retryBackoff(retries int) time.Duration {
 	if retries <= 0 {
 		return p.policy.InitialBackoff
 	}
@@ -458,4 +431,27 @@ func (p *PeerConnections) retryBackoff(retries int) time.Duration {
 		}
 	}
 	return backoff
+}
+
+func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
+	defaults := DefaultRetryPolicy()
+	if policy.InitialBackoff <= 0 {
+		policy.InitialBackoff = defaults.InitialBackoff
+	}
+	if policy.MaxBackoff < policy.InitialBackoff {
+		policy.MaxBackoff = defaults.MaxBackoff
+		if policy.MaxBackoff < policy.InitialBackoff {
+			policy.MaxBackoff = policy.InitialBackoff
+		}
+	}
+	if policy.RetryInterval <= 0 {
+		policy.RetryInterval = defaults.RetryInterval
+	}
+	if policy.DialTimeout <= 0 {
+		policy.DialTimeout = defaults.DialTimeout
+	}
+	if policy.ConnectTimeout <= 0 {
+		policy.ConnectTimeout = defaults.ConnectTimeout
+	}
+	return policy
 }
